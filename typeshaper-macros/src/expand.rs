@@ -260,8 +260,13 @@ fn expand_node(
         ShapeNode::Composed(expr) => {
             let id = next_anon_id();
             let anon_name = format!("__TypeshaperAnon_{}_{}", hint, id);
-            let anon_ident: Ident =
-                syn::parse_str(&anon_name).expect("anonymous ident is always valid");
+            let anon_ident: Ident = syn::parse_str(&anon_name).map_err(|e| {
+                syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!("typeshaper: internal error generating anonymous type `{}`: {}", anon_name, e),
+                )
+                .to_compile_error()
+            })?;
             let ts = expand_expr(*expr, &[], anon_ident.clone(), hint, acc)?;
             acc.push(ts);
             Ok(anon_ident)

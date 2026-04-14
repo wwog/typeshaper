@@ -63,7 +63,10 @@ pub fn typeshaper(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// companion macro. Parses inline field tokens and registers the type in the
 /// current crate's compilation-time HashMap. Emits no code.
 ///
-/// Format: `TypeName, field1: Type1, field2: Type2 [InnerType2], ...`
+/// Format: `TypeName, [vis] field1: Type1, [vis] field2: Type2 [InnerType2], ...`
+///
+/// The optional visibility token(s) before a field name (`pub`, `pub(crate)`, …)
+/// preserve the original field visibility across the crate boundary.
 ///
 /// The optional `[InnerType]` after a field's type carries the pre-`Option`
 /// inner type recorded by a `Partial` (`T?`) operation, so that `Required`
@@ -87,7 +90,7 @@ pub fn __typeshaper_import(input: TokenStream) -> TokenStream {
 /// | `T & [f1, f2]`      | Pick      | `TypeshaperInto<Target> for T`     |
 /// | `A + B`             | Merge     | `From<(A, B)> for Target`          |
 /// | `T?`                | Partial   | `From<T> for Target`               |
-/// | `T!`                | Required  | `TryFrom<T> for Target`            |
+/// | `T!`                | Required  | `TryFrom<T> for Target`（源无 Option 字段时为 `From<T>`）|
 /// | `A % B`             | Diff      | `TypeshaperInto<Target> for A`     |
 ///
 /// Every generated type is itself registered so it can be used as a source
