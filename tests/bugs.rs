@@ -87,7 +87,7 @@ fn issue2_required_unwraps_option_fields_keeps_plain_fields() {
 fn issue2_required_on_mixed_type_errors_when_option_field_is_none() {
     let mixed = MixedOptional { id: 99, name: None };
     let err = MixedRequired::try_from(mixed).unwrap_err();
-    assert_eq!(err, RequiredError { field: "name" });
+    assert_eq!(err, RequiredError::new("name"));
 }
 
 // ===========================================================================

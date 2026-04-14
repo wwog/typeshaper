@@ -168,7 +168,7 @@ fn required_errors_when_a_field_is_none() {
     };
 
     let err = UserComplete::try_from(draft).unwrap_err();
-    assert_eq!(err, RequiredError { field: "id" });
+    assert_eq!(err, RequiredError::new("id"));
     assert_eq!(err.field, "id");
     assert!(err.to_string().contains("id"));
 }
@@ -485,7 +485,7 @@ fn required_works_on_imported_option_fields() {
 fn required_errors_on_imported_none_field() {
     let draft = ImportedDraft { id: None, name: Some("bob".into()), score: Some(0) };
     let err = ImportedComplete::try_from(draft).unwrap_err();
-    assert_eq!(err, RequiredError { field: "id" });
+    assert_eq!(err, RequiredError::new("id"));
 }
 
 // ---------------------------------------------------------------------------

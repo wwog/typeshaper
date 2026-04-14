@@ -81,14 +81,18 @@ pub fn register_typeshaper(input: DeriveInput) -> TokenStream {
 /// companion `typeshaper_import_TypeName!()` macro that encodes field metadata
 /// as tokens for use in other crates.
 pub fn register_typeshaper_export(input: DeriveInput) -> TokenStream {
+    match try_register_typeshaper_export(input) {
+        Ok(ts) => ts,
+        Err(ts) => ts,
+    }
+}
+
+fn try_register_typeshaper_export(input: DeriveInput) -> R {
     let type_ident = &input.ident;
     let file       = crate_key();
     let type_name  = type_ident.to_string();
 
-    let fields = match extract_named_fields(&input) {
-        Ok(f)  => f,
-        Err(e) => return e,
-    };
+    let fields = extract_named_fields(&input)?;
 
     register(file, type_name.clone(), fields.clone());
     // Also write to the export registry so that consuming crates can find this
@@ -97,29 +101,44 @@ pub fn register_typeshaper_export(input: DeriveInput) -> TokenStream {
     register_exported(type_name, fields.clone());
 
     let macro_name = format!("typeshaper_import_{}", type_ident);
-    let macro_ident: Ident = syn::parse_str(&macro_name).expect("valid ident");
+    let macro_ident: Ident = syn::parse_str(&macro_name).map_err(|e| {
+        syn::Error::new(type_ident.span(), format!("typeshaper: cannot form macro name `{}`: {}", macro_name, e))
+            .to_compile_error()
+    })?;
 
     let field_entries: Vec<TokenStream> = fields
         .iter()
-        .map(|f| {
-            let fname: Ident = syn::parse_str(&f.name).expect("valid ident");
-            let ftype: TokenStream = f.ty_tokens.parse().expect("valid tokens");
+        .map(|f| -> R {
+            let fname: Ident = syn::parse_str(&f.name).map_err(|e| {
+                syn::Error::new(proc_macro2::Span::call_site(), format!("typeshaper: invalid field name `{}`: {}", f.name, e))
+                    .to_compile_error()
+            })?;
+            let ftype: TokenStream = f.ty_tokens.parse().map_err(|e| {
+                syn::Error::new(proc_macro2::Span::call_site(), format!("typeshaper: invalid type tokens `{}`: {}", f.ty_tokens, e))
+                    .to_compile_error()
+            })?;
             // Encode visibility so the consuming crate can restore it faithfully.
             // Visibility::Inherited produces an empty TokenStream, which is correct
             // for private fields (no keyword in the encoded format).
-            let fvis: TokenStream = f.vis.parse().expect("valid tokens");
+            let fvis: TokenStream = f.vis.parse().map_err(|e| {
+                syn::Error::new(proc_macro2::Span::call_site(), format!("typeshaper: invalid visibility `{}`: {}", f.vis, e))
+                    .to_compile_error()
+            })?;
             // Encode the inner (unwrapped) type in brackets so the consuming
             // crate can restore `unwrapped_ty` and apply `Required` (`T!`).
             if let Some(ref inner) = f.unwrapped_ty {
-                let inner_ts: TokenStream = inner.parse().expect("valid tokens");
-                quote! { #fvis #fname : #ftype [#inner_ts] }
+                let inner_ts: TokenStream = inner.parse().map_err(|e| {
+                    syn::Error::new(proc_macro2::Span::call_site(), format!("typeshaper: invalid inner type `{}`: {}", inner, e))
+                        .to_compile_error()
+                })?;
+                Ok(quote! { #fvis #fname : #ftype [#inner_ts] })
             } else {
-                quote! { #fvis #fname : #ftype }
+                Ok(quote! { #fvis #fname : #ftype })
             }
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
-    quote! {
+    Ok(quote! {
         #input
 
         #[macro_export]
@@ -128,7 +147,7 @@ pub fn register_typeshaper_export(input: DeriveInput) -> TokenStream {
                 ::typeshaper::__typeshaper_import!(#type_ident, #(#field_entries),*);
             };
         }
-    }
+    })
 }
 
 /// Consume the output of `__typeshaper_import!`: parse inline field tokens and
@@ -493,16 +512,40 @@ fn partial(attrs: &[Attribute], target: Ident, source: Ident) -> R {
 
 /// If `ty_tokens` represents `Option<T>`, returns the token-string of `T`.
 ///
+/// Only recognises the standard-library `Option` in its three canonical forms:
+/// - `Option<T>`
+/// - `std::option::Option<T>`
+/// - `core::option::Option<T>`
+///
+/// User-defined types whose last path segment happens to be `Option`
+/// (e.g. `my_crate::Option<T>`) are intentionally **not** matched.
+///
 /// Handles both locally-created Partial types (which carry `unwrapped_ty`) and
 /// imported types whose `unwrapped_ty` metadata was not available at import time
 /// (e.g. pre-v0.3 exports or manually written structs with `Option<_>` fields).
 fn try_unwrap_option(ty_tokens: &str) -> Option<String> {
     let ty: syn::Type = syn::parse_str(ty_tokens).ok()?;
     if let syn::Type::Path(tp) = ty {
-        let last = tp.path.segments.last()?;
-        if last.ident != "Option" {
+        // Reject `<Foo as Trait>::Option` and similar qualified paths.
+        if tp.qself.is_some() {
             return None;
         }
+        let segs: Vec<_> = tp.path.segments.iter().collect();
+        let is_std_option = match segs.as_slice() {
+            [s] if s.ident == "Option" => true,
+            [a, b, c]
+                if (a.ident == "std" || a.ident == "core")
+                    && b.ident == "option"
+                    && c.ident == "Option" =>
+            {
+                true
+            }
+            _ => false,
+        };
+        if !is_std_option {
+            return None;
+        }
+        let last = segs.last()?;
         if let syn::PathArguments::AngleBracketed(ref args) = last.arguments {
             if args.args.len() == 1 {
                 if let syn::GenericArgument::Type(inner) = &args.args[0] {
@@ -546,39 +589,63 @@ fn required(attrs: &[Attribute], target: Ident, source: Ident) -> R {
 
     register(crate_key(), target.to_string(), inner_fields);
 
-    // Build per-field TryFrom expressions:
-    //   Option<_> field → src.field.ok_or(RequiredError { field: "…" })?
-    //   plain field     → src.field
-    let try_from_exprs: Vec<TokenStream> = names
-        .iter()
-        .zip(needs_unwrap.iter())
-        .map(|(name, &unwrap)| {
-            if unwrap {
-                quote! {
-                    #name: src.#name.ok_or(
-                        ::typeshaper::RequiredError { field: stringify!(#name) }
-                    )?
+    let any_needs_unwrap = needs_unwrap.iter().any(|&b| b);
+
+    if any_needs_unwrap {
+        // At least one field is Option<_> and can be None → use TryFrom.
+        //
+        // Build per-field TryFrom expressions:
+        //   Option<_> field → src.field.ok_or(RequiredError { field: "…" })?
+        //   plain field     → src.field
+        let try_from_exprs: Vec<TokenStream> = names
+            .iter()
+            .zip(needs_unwrap.iter())
+            .map(|(name, &unwrap)| {
+                if unwrap {
+                    quote! {
+                        #name: src.#name.ok_or(
+                            ::typeshaper::RequiredError::new(stringify!(#name))
+                        )?
+                    }
+                } else {
+                    quote! { #name: src.#name }
                 }
-            } else {
-                quote! { #name: src.#name }
+            })
+            .collect();
+
+        Ok(quote! {
+            #(#attrs)*
+            pub struct #target {
+                #(#vises #names: #inner_types,)*
+            }
+
+            impl TryFrom<#source> for #target {
+                type Error = ::typeshaper::RequiredError;
+
+                fn try_from(src: #source) -> Result<Self, Self::Error> {
+                    Ok(Self { #(#try_from_exprs,)* })
+                }
             }
         })
-        .collect();
-
-    Ok(quote! {
-        #(#attrs)*
-        pub struct #target {
-            #(#vises #names: #inner_types,)*
-        }
-
-        impl TryFrom<#source> for #target {
-            type Error = ::typeshaper::RequiredError;
-
-            fn try_from(src: #source) -> Result<Self, Self::Error> {
-                Ok(Self { #(#try_from_exprs,)* })
+    } else {
+        // No field is Option<_> — conversion can never fail.  Generate From
+        // instead: the standard-library blanket impl
+        //   `impl<T, U> TryFrom<U> for T where T: From<U>`
+        // automatically provides TryFrom as well, so existing call-sites using
+        // `Target::try_from(src)` continue to compile without change.
+        Ok(quote! {
+            #(#attrs)*
+            pub struct #target {
+                #(#vises #names: #inner_types,)*
             }
-        }
-    })
+
+            impl From<#source> for #target {
+                fn from(src: #source) -> Self {
+                    Self { #(#names: src.#names,)* }
+                }
+            }
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -592,12 +659,17 @@ fn diff(attrs: &[Attribute], target: Ident, left: Ident, right: Ident) -> R {
     // Keep fields whose (name, type) pair does not appear in B.
     // Comparing by type string prevents excluding A.id:u64 just because
     // B happens to have an unrelated id:String field.
+    //
+    // Types are normalised before comparison: `quote!(#ty).to_string()` from
+    // `extract_named_fields` and `format!("Option<{}>", …)` from
+    // `wrapped_optional` can produce different whitespace for the same type.
+    // `normalize_ty` round-trips both through syn→quote to a canonical form.
     let kept: Vec<FieldDef> = fields_a
         .into_iter()
         .filter(|f| {
-            !fields_b
-                .iter()
-                .any(|fb| fb.name == f.name && fb.ty_tokens == f.ty_tokens)
+            !fields_b.iter().any(|fb| {
+                fb.name == f.name && normalize_ty(&fb.ty_tokens) == normalize_ty(&f.ty_tokens)
+            })
         })
         .collect();
 
@@ -630,6 +702,22 @@ fn diff(attrs: &[Attribute], target: Ident, left: Ident, right: Ident) -> R {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/// Canonicalise a type-token string for equality comparisons.
+///
+/// Different code paths store the same conceptual type with different
+/// whitespace: `quote!(#ty).to_string()` yields `"Option < String >"` while
+/// `format!("Option<{}>", inner)` yields `"Option<String>"`.  Parsing the
+/// string with syn and re-serialising via `quote!` normalises both to the
+/// same representation, making type comparisons robust across storage paths.
+///
+/// Falls back to the original string if parsing fails (defensive; should not
+/// happen for well-formed stored types).
+fn normalize_ty(ty_tokens: &str) -> String {
+    syn::parse_str::<syn::Type>(ty_tokens)
+        .map(|ty| quote!(#ty).to_string())
+        .unwrap_or_else(|_| ty_tokens.to_owned())
+}
 
 fn try_lookup(ident: &Ident) -> Result<Vec<FieldDef>, TokenStream> {
     let file = crate_key();
@@ -726,25 +814,18 @@ mod tests {
     use crate::parse::ImportInput;
     use quote::quote;
 
-    /// 隐患 1: expand_import 对所有字段硬编码 "pub" 可见性。
+    /// 验证 expand_import 正确保留字段可见性。
     ///
-    /// 根本原因：`ImportInput` 的字段格式是 `(Ident, TokenStream, Option<TokenStream>)`，
-    /// 三个槽位分别是字段名、字段类型、可选的 unwrapped_ty，**没有 visibility 槽位**。
-    /// `register_typeshaper_export` 生成的 `typeshaper_import_TypeName!()` 宏参数
-    /// 同样没有编码可见性。
-    ///
-    /// 期望行为：私有字段（visibility = ""）跨 crate 导入后应保留空可见性。
-    /// 当前行为：所有字段统一被注册为 "pub"，破坏封装性。
-    ///
-    /// 这个测试当前会 **FAIL**（实际得到 "pub"，期望 ""），证明 bug 存在。
+    /// `ImportInput` 携带 4-tuple `(name, ty, unwrapped, vis)`，第四槽位是可见性。
+    /// `expand_import` 应将 vis 原样写入 FieldDef.vis，不得硬编码为 "pub"。
     #[test]
-    fn issue1_import_loses_private_field_visibility() {
+    fn issue1_import_preserves_field_visibility() {
         let input = ImportInput {
             type_name: syn::parse_str("__BugIssue1_VisLoss").unwrap(),
             fields: vec![
-                // 模拟 pub id: u64（公开字段）
+                // pub id: u64（公开字段）
                 (syn::parse_str("id").unwrap(), quote! { u64 }, None, quote! { pub }),
-                // 模拟 secret: String（私有字段，空 visibility）
+                // secret: String（私有字段，空 visibility）
                 (syn::parse_str("secret").unwrap(), quote! { String }, None, quote! {}),
             ],
         };
@@ -758,7 +839,6 @@ mod tests {
         let secret_vis = &fields.iter().find(|f| f.name == "secret").unwrap().vis;
 
         assert_eq!(id_vis, "pub", "公开字段可见性应为 pub");
-        // ↓ 这个断言当前 FAIL：实际值是 "pub"（被硬编码），正确值应为 ""
         assert_eq!(secret_vis, "", "私有字段跨 crate 导入后应保留空可见性（无 pub 前缀）");
     }
 }

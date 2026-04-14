@@ -5,9 +5,17 @@ use std::fmt;
 /// Carries the name of the first `Option`-wrapped field that was `None` when
 /// attempting to convert a `Partial` type back into its `Required` form.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RequiredError {
     /// Name of the field that was `None`.
     pub field: &'static str,
+}
+
+impl RequiredError {
+    #[doc(hidden)]
+    pub const fn new(field: &'static str) -> Self {
+        Self { field }
+    }
 }
 
 impl fmt::Display for RequiredError {

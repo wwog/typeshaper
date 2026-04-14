@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "typeshaper"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "trybuild",
  "typeshaper-macros",
@@ -229,7 +229,7 @@ dependencies = [
 
 [[package]]
 name = "typeshaper-macros"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "once_cell",
  "proc-macro2",
