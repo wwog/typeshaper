@@ -1,0 +1,5 @@
+error: field `id` is listed more than once in the pick list
+  --> tests/ui/pick_duplicate_field.rs:12:30
+   |
+12 | typex!(UserDup = User & [id, id]);
+   |                              ^^

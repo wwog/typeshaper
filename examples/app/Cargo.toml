@@ -1,0 +1,8 @@
+[package]
+name = "typeshaper-example-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+typeshaper              = { path = "../.." }
+typeshaper-example-core = { path = "../core" }

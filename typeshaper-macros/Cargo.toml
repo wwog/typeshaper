@@ -1,0 +1,19 @@
+[package]
+name = "typeshaper-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Proc-macro internals for the typeshaper crate — do not use directly"
+keywords = ["macros", "codegen", "struct", "type-algebra"]
+categories = ["rust-patterns", "development-tools::procedural-macro-plugins"]
+readme = false
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+once_cell = "1"

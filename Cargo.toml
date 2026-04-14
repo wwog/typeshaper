@@ -1,0 +1,32 @@
+[workspace]
+members = [
+    "typeshaper-macros",
+    "examples/core",
+    "examples/app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/wwog/typeshaper"
+
+
+[package]
+name = "typeshaper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "TypeScript utility-type idioms (Omit, Pick, Merge, Partial…) for Rust structs — one-line type algebra expressions"
+
+keywords = ["codegen", "struct", "omit", "pick", "partial"]
+categories = ["rust-patterns", "development-tools::procedural-macro-plugins"]
+readme = "README.md"
+exclude = ["examples/"]
+
+[dependencies]
+typeshaper-macros = { path = "typeshaper-macros", version = "*" }
+
+[dev-dependencies]
+trybuild = { version = "1", features = ["diff"] }
