@@ -153,7 +153,10 @@ fn parse_ident_list(input: ParseStream) -> Result<Vec<Ident>> {
 
 /// Parsed input for the internal `__typeshaper_import!` proc-macro.
 ///
-/// Format: `TypeName, field1: Type1, field2: Type2 [InnerType2], ...`
+/// Format: `TypeName, [vis] field1: Type1, [vis] field2: Type2 [InnerType2], ...`
+///
+/// The optional visibility token(s) before a field name (`pub`, `pub(crate)`, …)
+/// preserve the original field visibility across the crate boundary.
 ///
 /// The optional `[InnerType]` bracket after a field's type carries the
 /// `unwrapped_ty` metadata produced by a `Partial` (`T?`) operation, allowing
@@ -163,11 +166,14 @@ fn parse_ident_list(input: ParseStream) -> Result<Vec<Ident>> {
 /// `#[typeshaper(export)]`. Users never write this directly.
 pub struct ImportInput {
     pub type_name: Ident,
-    /// `(field_name, ty_tokens, unwrapped_inner_ty)`
+    /// `(field_name, ty_tokens, unwrapped_inner_ty, vis_tokens)`
     ///
     /// `unwrapped_inner_ty` is `Some` when the exporting crate encoded the
     /// original pre-`Option` type in brackets (e.g. `[u64]` after `Option<u64>`).
-    pub fields: Vec<(Ident, TokenStream, Option<TokenStream>)>,
+    ///
+    /// `vis_tokens` is the field's visibility as a token stream (`pub`,
+    /// `pub (crate)`, or empty for private).
+    pub fields: Vec<(Ident, TokenStream, Option<TokenStream>, TokenStream)>,
 }
 
 impl Parse for ImportInput {
@@ -179,6 +185,10 @@ impl Parse for ImportInput {
             if input.is_empty() {
                 break;
             }
+            // Parse optional visibility (pub / pub(crate) / …) before field name.
+            // syn::Visibility is non-consuming when the next token is not a
+            // visibility keyword, so private fields simply yield Visibility::Inherited.
+            let vis: syn::Visibility = input.parse()?;
             let name: Ident = input.parse()?;
             input.parse::<Token![:]>()?;
             let ty: syn::Type = input.parse()?;
@@ -190,7 +200,7 @@ impl Parse for ImportInput {
             } else {
                 None
             };
-            fields.push((name, quote! { #ty }, unwrapped));
+            fields.push((name, quote! { #ty }, unwrapped, quote! { #vis }));
         }
         Ok(Self { type_name, fields })
     }

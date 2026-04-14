@@ -5,10 +5,8 @@
 #[test]
 fn compile_errors() {
     let t = trybuild::TestCases::new();
-    // Fix 2: Partial 二次包裹
-    t.compile_fail("tests/ui/partial_double_wrap.rs");
-    // Fix 3: Pick 重复字段
+    // Pick 重复字段
     t.compile_fail("tests/ui/pick_duplicate_field.rs");
-    // Fix 5: typeshaper 属性无效参数
+    // typeshaper 属性无效参数
     t.compile_fail("tests/ui/sculpt_invalid_attr.rs");
 }

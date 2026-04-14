@@ -1,5 +1,0 @@
-error: field `id` of `UserDraft` is already wrapped in `Option<_>`; `Partial` (`T?`) cannot be applied to a type that was already made partial
-  --> tests/ui/partial_double_wrap.rs:13:26
-   |
-13 | typex!(UserDoubleDraft = UserDraft?);
-   |                          ^^^^^^^^^

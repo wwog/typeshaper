@@ -104,13 +104,17 @@ pub fn register_typeshaper_export(input: DeriveInput) -> TokenStream {
         .map(|f| {
             let fname: Ident = syn::parse_str(&f.name).expect("valid ident");
             let ftype: TokenStream = f.ty_tokens.parse().expect("valid tokens");
+            // Encode visibility so the consuming crate can restore it faithfully.
+            // Visibility::Inherited produces an empty TokenStream, which is correct
+            // for private fields (no keyword in the encoded format).
+            let fvis: TokenStream = f.vis.parse().expect("valid tokens");
             // Encode the inner (unwrapped) type in brackets so the consuming
             // crate can restore `unwrapped_ty` and apply `Required` (`T!`).
             if let Some(ref inner) = f.unwrapped_ty {
                 let inner_ts: TokenStream = inner.parse().expect("valid tokens");
-                quote! { #fname : #ftype [#inner_ts] }
+                quote! { #fvis #fname : #ftype [#inner_ts] }
             } else {
-                quote! { #fname : #ftype }
+                quote! { #fvis #fname : #ftype }
             }
         })
         .collect();
@@ -151,17 +155,18 @@ pub fn expand_import(input: ImportInput) -> TokenStream {
     let fields: Vec<FieldDef> = input
         .fields
         .iter()
-        .map(|(name, ty, unwrapped)| {
+        .map(|(name, ty, unwrapped, vis)| {
+            let vis_str = vis.to_string();
             if let Some(inner) = unwrapped {
                 // Restore the Partial-wrapping metadata so `Required` (`T!`)
                 // works correctly in this crate.
                 FieldDef::wrapped_optional(
                     name.to_string(),
-                    "pub".to_string(),
+                    vis_str,
                     inner.to_string(),
                 )
             } else {
-                FieldDef::plain(name.to_string(), "pub".to_string(), ty.to_string())
+                FieldDef::plain(name.to_string(), vis_str, ty.to_string())
             }
         })
         .collect();
@@ -412,26 +417,61 @@ fn merge(attrs: &[Attribute], target: Ident, left: Ident, right: Ident) -> R {
 fn partial(attrs: &[Attribute], target: Ident, source: Ident) -> R {
     let all = try_lookup(&source)?;
 
-    if let Some(already) = all.iter().find(|f| f.unwrapped_ty.is_some()) {
-        return Err(syn::Error::new(
-            source.span(),
-            format!(
-                "field `{}` of `{}` is already wrapped in `Option<_>`; \
-                 `Partial` (`T?`) cannot be applied to a type that was already made partial",
-                already.name, source
-            ),
-        )
-        .to_compile_error());
-    }
+    // For each field decide how to handle it:
+    //   • Already Option<_> (by a prior Partial or written by the user) → keep as-is.
+    //     Record unwrapped_ty so that Required (`T!`) can restore the inner type later.
+    //   • Plain field → wrap in Option<_>.
+    //
+    // This makes Partial idempotent: applying `T?` to a type that already has
+    // optional fields never double-wraps or errors — it simply leaves those
+    // fields unchanged.
+    let mut opt_fields: Vec<FieldDef> = Vec::with_capacity(all.len());
+    let mut already_opt: Vec<bool> = Vec::with_capacity(all.len());
 
-    let opt_fields: Vec<FieldDef> = all
-        .iter()
-        .map(|f| FieldDef::wrapped_optional(f.name.clone(), f.vis.clone(), f.ty_tokens.clone()))
-        .collect();
+    for f in &all {
+        if f.unwrapped_ty.is_some() {
+            // Tagged by a prior Partial — keep exactly as stored.
+            opt_fields.push(f.clone());
+            already_opt.push(true);
+        } else if let Some(inner) = try_unwrap_option(&f.ty_tokens) {
+            // Hand-written Option<T> field — preserve ty_tokens but record the
+            // inner type in unwrapped_ty so Required can later unwrap it.
+            opt_fields.push(FieldDef {
+                name:         f.name.clone(),
+                vis:          f.vis.clone(),
+                ty_tokens:    f.ty_tokens.clone(),
+                unwrapped_ty: Some(inner),
+            });
+            already_opt.push(true);
+        } else {
+            // Plain field — wrap in Option<_>.
+            opt_fields.push(FieldDef::wrapped_optional(
+                f.name.clone(),
+                f.vis.clone(),
+                f.ty_tokens.clone(),
+            ));
+            already_opt.push(false);
+        }
+    }
 
     let (names, opt_types, vises) = to_token_vecs(&opt_fields)?;
 
     register(crate_key(), target.to_string(), opt_fields);
+
+    // Build per-field From expressions:
+    //   already-Optional → pass through unchanged  (field: src.field)
+    //   newly-wrapped    → wrap in Some             (field: Some(src.field))
+    let from_exprs: Vec<TokenStream> = names
+        .iter()
+        .zip(already_opt.iter())
+        .map(|(name, &already)| {
+            if already {
+                quote! { #name: src.#name }
+            } else {
+                quote! { #name: Some(src.#name) }
+            }
+        })
+        .collect();
 
     Ok(quote! {
         #(#attrs)*
@@ -441,7 +481,7 @@ fn partial(attrs: &[Attribute], target: Ident, source: Ident) -> R {
 
         impl From<#source> for #target {
             fn from(src: #source) -> Self {
-                #target { #(#names: Some(src.#names),)* }
+                #target { #(#from_exprs,)* }
             }
         }
     })
@@ -477,40 +517,53 @@ fn try_unwrap_option(ty_tokens: &str) -> Option<String> {
 fn required(attrs: &[Attribute], target: Ident, source: Ident) -> R {
     let all = try_lookup(&source)?;
 
-    // Every field must be Option<_>: either tagged by Partial (unwrapped_ty is
-    // Some) or parseable as Option<T> (e.g. imported types where unwrapped_ty
-    // metadata was absent).
-    for f in &all {
-        if f.unwrapped_ty.is_none() && try_unwrap_option(&f.ty_tokens).is_none() {
-            return Err(syn::Error::new(
-                source.span(),
-                format!(
-                    "field `{}` of `{}` is not `Option<_>`; \
-                     `Required` (`T!`) can only be applied to a type \
-                     where every field is `Option<_>`",
-                    f.name, source
-                ),
-            )
-            .to_compile_error());
-        }
-    }
-
+    // For each field decide how to handle it:
+    //   • Option<_> field (by Partial or user-written) → unwrap to inner type.
+    //   • Plain field → keep as-is.
+    //
+    // This makes Required complementary to Partial but still graceful:
+    // non-Option fields are preserved unchanged, so `T!` can be applied to
+    // mixed types without errors.
     let inner_fields: Vec<FieldDef> = all
         .iter()
         .map(|f| {
-            // Prefer the metadata stored by Partial; fall back to extracting
-            // the inner type directly from the Option<_> token string.
-            let inner = f.unwrapped_ty.clone().unwrap_or_else(|| {
-                try_unwrap_option(&f.ty_tokens)
-                    .expect("validated above that every field is Option<_>")
-            });
-            FieldDef::plain(f.name.clone(), f.vis.clone(), inner)
+            let inner_ty = f.unwrapped_ty.clone()
+                .or_else(|| try_unwrap_option(&f.ty_tokens));
+            match inner_ty {
+                Some(inner) => FieldDef::plain(f.name.clone(), f.vis.clone(), inner),
+                None        => f.clone(), // not Option<_> — keep as-is
+            }
         })
+        .collect();
+
+    // Track which fields are Option<_> (need `.ok_or()` in TryFrom) vs plain.
+    let needs_unwrap: Vec<bool> = all
+        .iter()
+        .map(|f| f.unwrapped_ty.is_some() || try_unwrap_option(&f.ty_tokens).is_some())
         .collect();
 
     let (names, inner_types, vises) = to_token_vecs(&inner_fields)?;
 
     register(crate_key(), target.to_string(), inner_fields);
+
+    // Build per-field TryFrom expressions:
+    //   Option<_> field → src.field.ok_or(RequiredError { field: "…" })?
+    //   plain field     → src.field
+    let try_from_exprs: Vec<TokenStream> = names
+        .iter()
+        .zip(needs_unwrap.iter())
+        .map(|(name, &unwrap)| {
+            if unwrap {
+                quote! {
+                    #name: src.#name.ok_or(
+                        ::typeshaper::RequiredError { field: stringify!(#name) }
+                    )?
+                }
+            } else {
+                quote! { #name: src.#name }
+            }
+        })
+        .collect();
 
     Ok(quote! {
         #(#attrs)*
@@ -522,13 +575,7 @@ fn required(attrs: &[Attribute], target: Ident, source: Ident) -> R {
             type Error = ::typeshaper::RequiredError;
 
             fn try_from(src: #source) -> Result<Self, Self::Error> {
-                Ok(Self {
-                    #(
-                        #names: src.#names.ok_or(
-                            ::typeshaper::RequiredError { field: stringify!(#names) }
-                        )?,
-                    )*
-                })
+                Ok(Self { #(#try_from_exprs,)* })
             }
         }
     })
@@ -542,12 +589,16 @@ fn diff(attrs: &[Attribute], target: Ident, left: Ident, right: Ident) -> R {
     let fields_a = try_lookup(&left)?;
     let fields_b = try_lookup(&right)?;
 
-    let names_b: std::collections::HashSet<&str> =
-        fields_b.iter().map(|f| f.name.as_str()).collect();
-
+    // Keep fields whose (name, type) pair does not appear in B.
+    // Comparing by type string prevents excluding A.id:u64 just because
+    // B happens to have an unrelated id:String field.
     let kept: Vec<FieldDef> = fields_a
         .into_iter()
-        .filter(|f| !names_b.contains(f.name.as_str()))
+        .filter(|f| {
+            !fields_b
+                .iter()
+                .any(|fb| fb.name == f.name && fb.ty_tokens == f.ty_tokens)
+        })
         .collect();
 
     if kept.is_empty() {
@@ -662,6 +713,53 @@ fn extract_named_fields(input: &DeriveInput) -> Result<Vec<FieldDef>, TokenStrea
             syn::Error::new_spanned(&input.ident, "#[typeshaper] only supports structs")
                 .to_compile_error(),
         ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse::ImportInput;
+    use quote::quote;
+
+    /// 隐患 1: expand_import 对所有字段硬编码 "pub" 可见性。
+    ///
+    /// 根本原因：`ImportInput` 的字段格式是 `(Ident, TokenStream, Option<TokenStream>)`，
+    /// 三个槽位分别是字段名、字段类型、可选的 unwrapped_ty，**没有 visibility 槽位**。
+    /// `register_typeshaper_export` 生成的 `typeshaper_import_TypeName!()` 宏参数
+    /// 同样没有编码可见性。
+    ///
+    /// 期望行为：私有字段（visibility = ""）跨 crate 导入后应保留空可见性。
+    /// 当前行为：所有字段统一被注册为 "pub"，破坏封装性。
+    ///
+    /// 这个测试当前会 **FAIL**（实际得到 "pub"，期望 ""），证明 bug 存在。
+    #[test]
+    fn issue1_import_loses_private_field_visibility() {
+        let input = ImportInput {
+            type_name: syn::parse_str("__BugIssue1_VisLoss").unwrap(),
+            fields: vec![
+                // 模拟 pub id: u64（公开字段）
+                (syn::parse_str("id").unwrap(), quote! { u64 }, None, quote! { pub }),
+                // 模拟 secret: String（私有字段，空 visibility）
+                (syn::parse_str("secret").unwrap(), quote! { String }, None, quote! {}),
+            ],
+        };
+
+        expand_import(input);
+
+        let fields = crate::state::lookup(None, "__BugIssue1_VisLoss")
+            .expect("expand_import 应将类型注册到 None 命名空间");
+
+        let id_vis = &fields.iter().find(|f| f.name == "id").unwrap().vis;
+        let secret_vis = &fields.iter().find(|f| f.name == "secret").unwrap().vis;
+
+        assert_eq!(id_vis, "pub", "公开字段可见性应为 pub");
+        // ↓ 这个断言当前 FAIL：实际值是 "pub"（被硬编码），正确值应为 ""
+        assert_eq!(secret_vis, "", "私有字段跨 crate 导入后应保留空可见性（无 pub 前缀）");
     }
 }
 
