@@ -21,7 +21,7 @@ repository.workspace = true
 description = "TypeScript utility-type idioms (Omit, Pick, Merge, Partial…) for Rust structs — one-line type algebra expressions"
 
 keywords = ["codegen", "struct", "omit", "pick", "partial"]
-categories = ["rust-patterns", "development-tools::procedural-macro-plugins"]
+categories = ["rust-patterns", "development-tools"]
 readme = "README.md"
 exclude = ["examples/"]
 

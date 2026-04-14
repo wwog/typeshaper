@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Proc-macro internals for the typeshaper crate — do not use directly"
 keywords = ["macros", "codegen", "struct", "type-algebra"]
-categories = ["rust-patterns", "development-tools::procedural-macro-plugins"]
+categories = ["rust-patterns", "development-tools"]
 readme = false
 
 [lib]
