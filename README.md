@@ -213,6 +213,91 @@ typex!(#[derive(Debug, Clone)] UserPatch  = User?);
 
 ---
 
+## Generic types
+
+When a source struct has type parameters, you must declare them **explicitly** in `typex!()` — on the target name and on each generic source node. This is intentional: implicit inheritance would silently produce the wrong struct when multiple type parameters come from different sources.
+
+### Basic type parameter
+
+```rust
+#[typeshaper]
+#[derive(Debug, Clone)]
+pub struct Wrapper<T> {
+    pub inner: T,
+    pub label: String,
+    pub count: usize,
+}
+
+// <T> is declared on both the target name and the source node
+typex!(#[derive(Debug, Clone)] WrapperNoLabel<T>  = Wrapper<T> - [label]);
+typex!(#[derive(Debug, Clone)] WrapperPartial<T>  = Wrapper<T>?);
+typex!(#[derive(Debug, Clone)] WrapperRequired<T> = WrapperPartial<T>!);
+
+let w = Wrapper { inner: 42u32, label: "hi".into(), count: 3 };
+let no_label: WrapperNoLabel<u32> = w.project();
+```
+
+### Multiple type parameters (Merge)
+
+When merging two generic types, the target declares all parameters; each source node uses its own:
+
+```rust
+#[typeshaper]
+pub struct Person<T> { pub name: T, pub age: u8 }
+
+#[typeshaper]
+pub struct Addr<U> { pub city: U, pub zip: String }
+
+// T comes from Person, U comes from Addr — both declared on the target
+typex!(#[derive(Debug)] PersonWithAddr<T, U> = Person<T> + Addr<U>);
+
+let full = PersonWithAddr::from((person, addr));
+```
+
+### Inline trait bounds and where clauses
+
+```rust
+typex!(PrintableValue<T: std::fmt::Display + Clone> = Printable<T> - [note]);
+
+typex!(ConstrainedData<T> where T: Clone + PartialEq = Constrained<T> - [meta]);
+```
+
+### Lifetime parameters
+
+```rust
+#[typeshaper]
+pub struct Borrowed<'a> { pub name: &'a str, pub value: u32 }
+
+typex!(BorrowedName<'a> = Borrowed<'a> & [name]);
+```
+
+### Cross-crate generic types
+
+Generic parameter metadata is encoded in the companion macro and fully restored on import:
+
+```rust
+// core-crate
+#[typeshaper(export)]
+pub struct GenericModel<T> { pub id: u64, pub payload: T, pub hidden: bool }
+```
+
+```rust
+// app-crate
+typeshaper_import_GenericModel!();
+
+typex!(#[derive(Debug)] ModelPublic<T> = GenericModel<T> - [hidden]);
+typex!(#[derive(Debug)] ModelDraft<T>  = GenericModel<T>?);
+```
+
+> **Compile-error guard**: forgetting type parameters is caught at compile time:
+> ```
+> typex!(Bad = Wrapper - [label]);
+> //          ^^^^^^^ error: type `Wrapper` has generic parameters;
+> //                  declare them explicitly, e.g. `Target<T> = Wrapper<T>`
+> ```
+
+---
+
 ## Reference
 
 ### Installation
@@ -278,12 +363,13 @@ typex!(Roundtrip = (User - [password_hash])?!);
 ### `typex!()` syntax
 
 ```
-typex!( [#[attr...]]  TargetName  =  Expr );
+typex!( [#[attr...]]  TargetName[<Params>] [where ...]  =  Expr );
 ```
 
 - **Attributes** (optional): placed before `TargetName`, forwarded verbatim to the generated struct; multiple attributes can be stacked. `typex!()` never adds any `#[derive]` on its own.
 - **TargetName**: the name of the generated struct; also registered in the compile-time table so it can be used as a source in subsequent `typex!()` calls.
-- **Expr**: a type-algebra expression — see the table above.
+- **`<Params>`** (optional): explicit generic or lifetime parameters for the target type — required when any source in `Expr` is a generic type. Inline bounds (`T: Clone + Debug`) and separate `where` clauses are both accepted.
+- **Expr**: a type-algebra expression — see the table above. Each source node that refers to a generic type must carry matching type arguments: `Source<T>`, `Source<'a>`, etc.
 
 ```rust
 typex!(
@@ -376,6 +462,7 @@ typex!(#[derive(Debug, Clone)] UserOnly      = User % Address);
 - [x] Expression composition and chaining
 - [x] Attribute forwarding
 - [x] Cross-crate export / import
+- [x] Generics, lifetimes, and trait bounds — explicit type parameters required
 
 ---
 

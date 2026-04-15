@@ -76,7 +76,7 @@ pub struct UserPatch {
 
 ```toml
 [dependencies]
-typeshaper = "0.3"
+typeshaper = "0.1"
 ```
 
 ```rust
@@ -211,13 +211,98 @@ typex!(#[derive(Debug, Clone)] UserPatch  = User?);
 
 ---
 
+## 泛型支持
+
+当源结构体带有类型参数时，在 `typex!()` 中必须**显式**声明——同时写在目标名称和源节点上。这是有意为之：隐式继承在多个类型参数来自不同源类型时会产生错误的结构体。
+
+### 基本类型参数
+
+```rust
+#[typeshaper]
+#[derive(Debug, Clone)]
+pub struct Wrapper<T> {
+    pub inner: T,
+    pub label: String,
+    pub count: usize,
+}
+
+// <T> 同时出现在目标名称和源节点上
+typex!(#[derive(Debug, Clone)] WrapperNoLabel<T>  = Wrapper<T> - [label]);
+typex!(#[derive(Debug, Clone)] WrapperPartial<T>  = Wrapper<T>?);
+typex!(#[derive(Debug, Clone)] WrapperRequired<T> = WrapperPartial<T>!);
+
+let w = Wrapper { inner: 42u32, label: "hi".into(), count: 3 };
+let no_label: WrapperNoLabel<u32> = w.project();
+```
+
+### 多类型参数（Merge）
+
+合并两个泛型类型时，目标声明所有参数，每个源节点使用自己的参数：
+
+```rust
+#[typeshaper]
+pub struct Person<T> { pub name: T, pub age: u8 }
+
+#[typeshaper]
+pub struct Addr<U> { pub city: U, pub zip: String }
+
+// T 来自 Person，U 来自 Addr，目标同时声明两者
+typex!(#[derive(Debug)] PersonWithAddr<T, U> = Person<T> + Addr<U>);
+
+let full = PersonWithAddr::from((person, addr));
+```
+
+### 内联 trait bound 与 where 子句
+
+```rust
+typex!(PrintableValue<T: std::fmt::Display + Clone> = Printable<T> - [note]);
+
+typex!(ConstrainedData<T> where T: Clone + PartialEq = Constrained<T> - [meta]);
+```
+
+### 生命周期参数
+
+```rust
+#[typeshaper]
+pub struct Borrowed<'a> { pub name: &'a str, pub value: u32 }
+
+typex!(BorrowedName<'a> = Borrowed<'a> & [name]);
+```
+
+### 跨 crate 泛型类型
+
+泛型元数据已编码在伴生宏中，导入时自动还原，用法与本 crate 完全相同：
+
+```rust
+// core-crate
+#[typeshaper(export)]
+pub struct GenericModel<T> { pub id: u64, pub payload: T, pub hidden: bool }
+```
+
+```rust
+// app-crate
+typeshaper_import_GenericModel!();
+
+typex!(#[derive(Debug)] ModelPublic<T> = GenericModel<T> - [hidden]);
+typex!(#[derive(Debug)] ModelDraft<T>  = GenericModel<T>?);
+```
+
+> **编译期守卫**：忘记写类型参数会在编译时报错：
+> ```
+> typex!(Bad = Wrapper - [label]);
+> //          ^^^^^^^ error: type `Wrapper` has generic parameters;
+> //                  declare them explicitly, e.g. `Target<T> = Wrapper<T>`
+> ```
+
+---
+
 ## 参考文档
 
 ### 安装
 
 ```toml
 [dependencies]
-typeshaper = "0.3"
+typeshaper = "0.1"
 ```
 
 ### 前置标注：`#[typeshaper]`
@@ -277,12 +362,13 @@ typex!(Roundtrip = (User - [password_hash])?!);
 ### `typex!()` 语法
 
 ```
-typex!( [#[attr...]]  TargetName  =  Expr );
+typex!( [#[attr...]]  TargetName[<Params>] [where ...]  =  Expr );
 ```
 
 - **属性**（可选）：写在 `TargetName` 前，原样附加到生成的结构体，支持叠放多个。`typex!()` 不会自动添加任何 `#[derive]`，全部由调用方声明。
 - **TargetName**：生成的结构体名称，同时注册到编译期注册表，可继续作为后续 `typex!()` 的输入。
-- **Expr**：类型代数表达式，见上表。
+- **`<Params>`**（可选）：目标类型的显式泛型或生命周期参数——当 `Expr` 中任意源类型是泛型时必须填写。支持内联 bound（`T: Clone + Debug`）和单独 `where` 子句两种写法。
+- **Expr**：类型代数表达式，见上表。涉及泛型源类型的节点必须携带匹配的类型参数：`Source<T>`、`Source<'a>` 等。
 
 ```rust
 typex!(
@@ -375,3 +461,4 @@ typex!(#[derive(Debug, Clone)] UserOnly      = User % Address);
 - [x] 表达式组合与链式操作
 - [x] 属性透传
 - [x] 跨 crate 导出 / 导入
+- [x] 泛型、生命周期与 trait bound — 要求显式声明类型参数

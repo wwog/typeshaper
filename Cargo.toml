@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/wwog/typeshaper"
@@ -26,7 +26,7 @@ readme = "README.md"
 exclude = ["examples/"]
 
 [dependencies]
-typeshaper-macros = { path = "typeshaper-macros", version = "0.1.3" }
+typeshaper-macros = { path = "typeshaper-macros", version = "0.1.4" }
 
 [dev-dependencies]
 trybuild = { version = "1", features = ["diff"] }
