@@ -338,8 +338,8 @@ pub struct User {
 | `T & [f1, f2]` | **Pick** | 只保留列出的字段 | `TypeshaperInto<Target> for T` |
 | `A + B` | **Merge** | 合并 A 和 B 的全部字段（不允许重名） | `From<(A, B)> for Target` |
 | `T?` | **Partial** | 所有字段变为 `Option<_>` | `From<T> for Target` |
-| `T!` | **Required** | 还原 Partial 的 `Option<_>` | `TryFrom<T> for Target` |
-| `A % B` | **Diff** | A 有而 B 没有的字段 | `TypeshaperInto<Target> for A` |
+| `T!` | **Required** | 还原 Partial 的 `Option<_>` | `TryFrom<T> for Target`（源无 `Option` 字段时为 `From<T>`） |
+| `A % B` | **Diff** | A 有而 B 没有的字段（按字段名**和**类型同时匹配） | `TypeshaperInto<Target> for A` |
 
 **组合规则**
 

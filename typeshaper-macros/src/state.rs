@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// critical property when rust-analyzer reuses a single proc-macro server for
 /// the entire workspace.
 ///
-/// `None` is used for the cross-crate import namespace (see [`register_import`])
-/// and in unit-test contexts where the env-var is absent.
+/// `None` is used for the cross-crate import namespace and in unit-test contexts
+/// where the env-var is absent.
 type RegKey = (Option<String>, String);
 
 static ANON_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -78,6 +78,7 @@ pub struct TypeEntry {
 
 impl TypeEntry {
     /// A plain, non-generic type entry.
+    #[allow(dead_code)]
     pub fn plain(fields: Vec<FieldDef>) -> Self {
         Self {
             fields,
@@ -128,19 +129,6 @@ pub fn lookup(crate_dir: Option<String>, type_name: &str) -> Option<TypeEntry> {
         .unwrap_or_else(|e| e.into_inner())
         .get(&(crate_dir, type_name.to_string()))
         .cloned()
-}
-
-// ---------------------------------------------------------------------------
-// Cross-crate import namespace  (key = None in primary registry)
-// ---------------------------------------------------------------------------
-
-/// Registers a cross-crate import under the `None` key.
-///
-/// Called only by `expand_import` (via `__typeshaper_import!`).
-/// Cross-crate imports do not carry generic metadata (the companion macro
-/// format currently encodes only field names, types, and visibility).
-pub fn register_import(type_name: String, fields: Vec<FieldDef>) {
-    register(None, type_name, TypeEntry::plain(fields));
 }
 
 // ---------------------------------------------------------------------------
@@ -341,7 +329,8 @@ mod tests {
             TypeEntry::plain(local_fields.clone()));
 
         let import_fields = vec![FieldDef::plain("role".into(), "pub".into(), "String".into())];
-        register_import("__StateTest_Import_User".into(), import_fields.clone());
+        register(None, "__StateTest_Import_User".into(),
+            TypeEntry::plain(import_fields.clone()));
 
         assert_eq!(
             lookup(local_dir, "__StateTest_Import_User").unwrap().fields,

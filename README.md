@@ -339,8 +339,8 @@ pub struct User {
 | `T & [f1, f2]` | **Pick** | Keep only listed fields | `TypeshaperInto<Target> for T` |
 | `A + B` | **Merge** | Combine all fields of A and B (no duplicates) | `From<(A, B)> for Target` |
 | `T?` | **Partial** | Wrap every field in `Option<_>` | `From<T> for Target` |
-| `T!` | **Required** | Unwrap `Option<_>` from a Partial type | `TryFrom<T> for Target` |
-| `A % B` | **Diff** | Fields present in A but absent in B | `TypeshaperInto<Target> for A` |
+| `T!` | **Required** | Unwrap `Option<_>` from a Partial type | `TryFrom<T> for Target` (or `From<T>` when the source has no `Option` fields) |
+| `A % B` | **Diff** | Fields present in A but absent in B (matched on both field name **and** type) | `TypeshaperInto<Target> for A` |
 
 **Composition rules**
 

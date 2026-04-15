@@ -5,7 +5,6 @@ use syn::{Attribute, Data, DeriveInput, Fields, Ident};
 use crate::parse::{ImportInput, ShapeExpr, ShapeInput, ShapeNode};
 use crate::state::{
     FieldDef, TypeEntry, lookup, lookup_exported, next_anon_id, register, register_exported,
-    register_import,
 };
 
 // ---------------------------------------------------------------------------
@@ -191,8 +190,26 @@ fn try_register_typeshaper_export(input: DeriveInput) -> R {
 
     // Encode generics and where clause as bracket-wrapped token groups.
     // Format: `__typeshaper_import!(TypeName, [<generics>], [where ...], fields...)`
-    let generics_ts: TokenStream = entry.generics_tokens.parse().unwrap_or_default();
-    let where_ts: TokenStream = entry.where_tokens.parse().unwrap_or_default();
+    let generics_ts: TokenStream = entry.generics_tokens.parse().map_err(|e| {
+        syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!(
+                "typeshaper: failed to re-parse generics tokens `{}`: {}",
+                entry.generics_tokens, e
+            ),
+        )
+        .to_compile_error()
+    })?;
+    let where_ts: TokenStream = entry.where_tokens.parse().map_err(|e| {
+        syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!(
+                "typeshaper: failed to re-parse where tokens `{}`: {}",
+                entry.where_tokens, e
+            ),
+        )
+        .to_compile_error()
+    })?;
 
     let field_entries: Vec<TokenStream> = entry
         .fields
@@ -274,10 +291,7 @@ pub fn expand_import(input: ImportInput) -> TokenStream {
         .collect();
 
     let entry = TypeEntry::with_generics(fields, generics_tokens, where_tokens);
-    register_import(type_name, entry.fields.clone());
-    // Also store with generics in the import namespace (None key) via direct register.
-    // We override the plain registration done by register_import above.
-    register(None, input.type_name.to_string(), entry);
+    register(None, type_name, entry);
     TokenStream::new()
 }
 
@@ -436,14 +450,32 @@ fn omit(
         }
     }
 
+    // H-3: reject empty omit list
+    if omit_fields.is_empty() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "omit field list must not be empty; use `T` (Rebuild) to copy all fields",
+        )
+        .to_compile_error());
+    }
+
+    // B-2: check for duplicate fields and non-existent fields
+    let mut seen = std::collections::HashSet::new();
     for f in &omit_fields {
-        if !src_entry.fields.iter().any(|d| d.name == f.to_string()) {
+        let name = f.to_string();
+        if !seen.insert(name.clone()) {
+            return Err(syn::Error::new(
+                f.span(),
+                format!("field `{}` is listed more than once in the omit list", name),
+            )
+            .to_compile_error());
+        }
+        if !src_entry.fields.iter().any(|d| d.name == name) {
             return Err(field_not_found(f, &source));
         }
     }
+    let omit_set = seen;
 
-    let omit_set: std::collections::HashSet<String> =
-        omit_fields.iter().map(|f| f.to_string()).collect();
     let kept: Vec<FieldDef> = src_entry
         .fields
         .into_iter()
@@ -501,6 +533,15 @@ fn pick(
         if let Some(err) = check_no_implicit_generics(&source, &src_entry, target_generics) {
             return Err(err);
         }
+    }
+
+    // H-3: reject empty pick list
+    if pick_fields.is_empty() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "pick field list must not be empty; use `T` (Rebuild) to copy all fields",
+        )
+        .to_compile_error());
     }
 
     let mut seen = std::collections::HashSet::new();
@@ -608,12 +649,8 @@ fn merge(
         target_generics.clone()
     } else if allow_inherit {
         // Auto-merge both source generics (only for anonymous intermediates).
-        let merged_g = merge_generics_tokens(&entry_a.generics_tokens, &entry_b.generics_tokens);
-        let merged_w = merge_where_tokens(&entry_a.where_tokens, &entry_b.where_tokens);
-        let src = format!("struct __D{} {} {{}}", merged_g, merged_w);
-        syn::parse_str::<DeriveInput>(&src)
-            .map(|di| di.generics)
-            .unwrap_or_default()
+        // Uses syn-based deduplication to avoid <T, T> collisions (B-3).
+        merge_generics(&entry_a, &entry_b)
     } else {
         syn::Generics::default()
     };
@@ -1062,31 +1099,39 @@ fn extract_type_entry(input: &DeriveInput) -> Result<TypeEntry, TokenStream> {
     Ok(TypeEntry::with_generics(fields, generics_tokens, where_tokens))
 }
 
-/// Concatenate two angle-bracket param lists: `"<T>"` + `"<U>"` → `"<T, U>"`.
-fn merge_generics_tokens(a: &str, b: &str) -> String {
-    match (a.is_empty(), b.is_empty()) {
-        (true, true) => String::new(),
-        (false, true) => a.to_owned(),
-        (true, false) => b.to_owned(),
-        (false, false) => {
-            let inner_a = a.trim().trim_start_matches('<').trim_end_matches('>').trim();
-            let inner_b = b.trim().trim_start_matches('<').trim_end_matches('>').trim();
-            format!("<{}, {}>", inner_a, inner_b)
-        }
+/// Returns a stable string identifier for a generic parameter, used for deduplication.
+fn generic_param_ident(p: &syn::GenericParam) -> String {
+    match p {
+        syn::GenericParam::Type(t) => t.ident.to_string(),
+        syn::GenericParam::Lifetime(l) => l.lifetime.ident.to_string(),
+        syn::GenericParam::Const(c) => c.ident.to_string(),
     }
 }
 
-/// Merge two where-clause strings: `"where A"` + `"where B"` → `"where A, B"`.
-fn merge_where_tokens(a: &str, b: &str) -> String {
-    match (a.is_empty(), b.is_empty()) {
-        (true, true) => String::new(),
-        (false, true) => a.to_owned(),
-        (true, false) => b.to_owned(),
-        (false, false) => {
-            let predicates_b = b.trim().strip_prefix("where").unwrap_or(b).trim().to_owned();
-            format!("{}, {}", a, predicates_b)
+/// Merge the generic parameters of two `TypeEntry`s into a single `syn::Generics`,
+/// deduplicating by parameter identifier (prevents `<T, T>` when both sources share
+/// the same type variable).
+///
+/// Where-clause predicates from both sides are combined without deduplication
+/// (identical predicates are harmless; de-duplicating them would require deeper
+/// semantic comparison).
+fn merge_generics(entry_a: &TypeEntry, entry_b: &TypeEntry) -> syn::Generics {
+    let g_a = parse_stored_generics(entry_a);
+    let g_b = parse_stored_generics(entry_b);
+
+    let existing: std::collections::HashSet<String> =
+        g_a.params.iter().map(generic_param_ident).collect();
+
+    let mut merged = g_a;
+    for param in g_b.params {
+        if !existing.contains(&generic_param_ident(&param)) {
+            merged.params.push(param);
         }
     }
+    if let Some(wc_b) = g_b.where_clause {
+        merged.make_where_clause().predicates.extend(wc_b.predicates);
+    }
+    merged
 }
 
 // ---------------------------------------------------------------------------
@@ -1133,40 +1178,52 @@ mod tests {
     }
 
     #[test]
-    fn merge_generics_tokens_both_empty() {
-        assert_eq!(merge_generics_tokens("", ""), "");
+    fn merge_generics_both_empty() {
+        let a = TypeEntry::plain(vec![]);
+        let b = TypeEntry::plain(vec![]);
+        let merged = merge_generics(&a, &b);
+        assert!(merged.params.is_empty(), "both empty → no params");
+        assert!(merged.where_clause.is_none());
     }
 
     #[test]
-    fn merge_generics_tokens_one_empty() {
-        assert_eq!(merge_generics_tokens("< T >", ""), "< T >");
-        assert_eq!(merge_generics_tokens("", "< U >"), "< U >");
+    fn merge_generics_one_empty() {
+        let a = TypeEntry::with_generics(vec![], "< T >".into(), "".into());
+        let b = TypeEntry::plain(vec![]);
+        let merged_ab = merge_generics(&a, &b);
+        assert_eq!(merged_ab.params.len(), 1, "one generic + empty → 1 param");
+
+        let merged_ba = merge_generics(&b, &a);
+        assert_eq!(merged_ba.params.len(), 1, "empty + one generic → 1 param");
     }
 
     #[test]
-    fn merge_generics_tokens_both_nonempty() {
-        let result = merge_generics_tokens("< T >", "< U >");
-        assert!(result.contains('T'), "result: {result}");
-        assert!(result.contains('U'), "result: {result}");
-        assert!(result.contains(','), "result: {result}");
+    fn merge_generics_different_params() {
+        let a = TypeEntry::with_generics(vec![], "< T >".into(), "".into());
+        let b = TypeEntry::with_generics(vec![], "< U >".into(), "".into());
+        let merged = merge_generics(&a, &b);
+        assert_eq!(merged.params.len(), 2, "T + U → 2 params");
+        let names: Vec<String> = merged.params.iter().map(generic_param_ident).collect();
+        assert!(names.contains(&"T".to_string()), "T must be present");
+        assert!(names.contains(&"U".to_string()), "U must be present");
     }
 
     #[test]
-    fn merge_where_both_empty() {
-        assert_eq!(merge_where_tokens("", ""), "");
+    fn merge_generics_deduplicates_same_param() {
+        let a = TypeEntry::with_generics(vec![], "< T >".into(), "".into());
+        let b = TypeEntry::with_generics(vec![], "< T >".into(), "".into());
+        let merged = merge_generics(&a, &b);
+        assert_eq!(merged.params.len(), 1, "same param T in both → deduplicated to 1");
+        assert_eq!(generic_param_ident(&merged.params[0]), "T");
     }
 
     #[test]
-    fn merge_where_one_empty() {
-        assert_eq!(merge_where_tokens("where T : Clone", ""), "where T : Clone");
-        assert_eq!(merge_where_tokens("", "where U : Debug"), "where U : Debug");
-    }
-
-    #[test]
-    fn merge_where_both_nonempty() {
-        let result = merge_where_tokens("where T : Clone", "where U : Debug");
-        assert!(result.contains("T"), "result: {result}");
-        assert!(result.contains("U"), "result: {result}");
+    fn merge_generics_combines_where_clauses() {
+        let a = TypeEntry::with_generics(vec![], "< T >".into(), "where T : Clone".into());
+        let b = TypeEntry::with_generics(vec![], "< U >".into(), "where U : Debug".into());
+        let merged = merge_generics(&a, &b);
+        let wc = merged.where_clause.expect("should have where clause");
+        assert_eq!(wc.predicates.len(), 2, "two predicates from both sides");
     }
 }
 
