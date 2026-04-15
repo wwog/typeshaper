@@ -213,6 +213,33 @@ typex!(#[derive(Debug, Clone)] UserPatch  = User?);
 
 ---
 
+## Re-export with new attributes
+
+Sometimes you need to annotate a struct you didn't write — and cannot touch.
+
+A typical case is FFI. The [`napi-rs`](https://napi.rs/) framework requires `#[napi]` on every struct it exposes to Node.js. Your domain model lives in `core-crate`; the FFI crate must not modify it — adding attributes directly to someone else's package crosses crate boundaries and won't compile.
+
+With typeshaper, a bare source expression (`T` with no operator) rebuilds the struct verbatim so you can attach new attributes:
+
+```rust
+// napi-crate/src/lib.rs
+use core_crate::{User, typeshaper_import_User};
+
+typeshaper_import_User!();
+
+// Exact same fields as User — zero manual duplication
+typex!(#[napi] UserNapi = User);
+
+// Drop sensitive fields first, then expose via napi
+typex!(#[napi] UserPublicNapi = User - [password_hash]);
+```
+
+The `User → UserNapi` conversion impl is generated automatically. The domain struct stays clean; the FFI crate owns the annotation.
+
+The same pattern applies whenever an attribute can't live in the source crate: `#[repr(C)]` for C FFI, `#[pyclass]` for PyO3, a custom `#[derive]` from a third-party crate, and so on.
+
+---
+
 ## Generic types
 
 When a source struct has type parameters, you must declare them **explicitly** in `typex!()` — on the target name and on each generic source node. This is intentional: implicit inheritance would silently produce the wrong struct when multiple type parameters come from different sources.
@@ -335,6 +362,7 @@ pub struct User {
 
 | Syntax | Name | Meaning | Generated impl |
 |--------|------|---------|----------------|
+| `T` | **Rebuild** | Copy all fields unchanged; apply new attributes | `TypeshaperInto<Target> for T` |
 | `T - [f1, f2]` | **Omit** | Remove listed fields | `TypeshaperInto<Target> for T` |
 | `T & [f1, f2]` | **Pick** | Keep only listed fields | `TypeshaperInto<Target> for T` |
 | `A + B` | **Merge** | Combine all fields of A and B (no duplicates) | `From<(A, B)> for Target` |

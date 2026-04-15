@@ -211,6 +211,33 @@ typex!(#[derive(Debug, Clone)] UserPatch  = User?);
 
 ---
 
+## 重导出并附加新属性
+
+有时你需要给一个你没有编写、也无法修改的结构体添加属性。
+
+典型场景是 FFI 绑定。以 [`napi-rs`](https://napi.rs/) 为例：它要求每个导出到 Node.js 的结构体都标注 `#[napi]`，而你的领域模型在 `core-crate` 里，FFI 层的 `napi-crate` 绝不能去改动它——给别人的包直接加属性既跨越了 crate 边界，也根本无法编译通过。
+
+用 typeshaper，一个没有任何运算符的裸源表达式（`T`）会原样重建结构体，同时附加你指定的新属性：
+
+```rust
+// napi-crate/src/lib.rs
+use core_crate::{User, typeshaper_import_User};
+
+typeshaper_import_User!();
+
+// 字段与 User 完全相同，无需手动复制任何字段
+typex!(#[napi] UserNapi = User);
+
+// 先去掉敏感字段，再经由 napi 导出
+typex!(#[napi] UserPublicNapi = User - [password_hash]);
+```
+
+`User → UserNapi` 的转换 impl 自动生成，领域结构体保持干净，FFI 层自行持有注解。
+
+同理，凡是不能写在源 crate 里的属性，都可以用这个方式附加：`#[repr(C)]`（C FFI）、`#[pyclass]`（PyO3）、第三方 crate 提供的自定义 `#[derive]` 等。
+
+---
+
 ## 泛型支持
 
 当源结构体带有类型参数时，在 `typex!()` 中必须**显式**声明——同时写在目标名称和源节点上。这是有意为之：隐式继承在多个类型参数来自不同源类型时会产生错误的结构体。
@@ -334,6 +361,7 @@ pub struct User {
 
 | 语法 | 名称 | 含义 | 生成的 impl |
 |------|------|------|-------------|
+| `T` | **Rebuild** | 原样复制所有字段；附加新属性 | `TypeshaperInto<Target> for T` |
 | `T - [f1, f2]` | **Omit** | 移除列出的字段 | `TypeshaperInto<Target> for T` |
 | `T & [f1, f2]` | **Pick** | 只保留列出的字段 | `TypeshaperInto<Target> for T` |
 | `A + B` | **Merge** | 合并 A 和 B 的全部字段（不允许重名） | `From<(A, B)> for Target` |
