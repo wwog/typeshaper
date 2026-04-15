@@ -9,4 +9,6 @@ fn compile_errors() {
     t.compile_fail("tests/ui/pick_duplicate_field.rs");
     // typeshaper 属性无效参数
     t.compile_fail("tests/ui/sculpt_invalid_attr.rs");
+    // 泛型源类型未显式声明泛型参数
+    t.compile_fail("tests/ui/generic_without_params.rs");
 }

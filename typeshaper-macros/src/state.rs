@@ -59,29 +59,70 @@ impl FieldDef {
     }
 }
 
+/// Per-type registry entry: fields plus optional generic/lifetime/where-clause metadata.
+///
+/// The `generics_tokens` and `where_tokens` are stored as raw token strings so
+/// they can cross macro-invocation boundaries inside the same compilation unit
+/// (the proc-macro process keeps the global statics alive for the whole build).
+/// They are re-parsed into `syn::Generics` only when code generation needs them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TypeEntry {
+    pub fields: Vec<FieldDef>,
+    /// Angle-bracket generic parameter list, e.g. `"< T : Clone + Display , 'a >"`.
+    /// Empty string for non-generic types.
+    pub generics_tokens: String,
+    /// Where clause, e.g. `"where T : Debug"`.
+    /// Empty string if absent.
+    pub where_tokens: String,
+}
+
+impl TypeEntry {
+    /// A plain, non-generic type entry.
+    pub fn plain(fields: Vec<FieldDef>) -> Self {
+        Self {
+            fields,
+            generics_tokens: String::new(),
+            where_tokens: String::new(),
+        }
+    }
+
+    /// A generic type entry.
+    pub fn with_generics(
+        fields: Vec<FieldDef>,
+        generics_tokens: String,
+        where_tokens: String,
+    ) -> Self {
+        Self { fields, generics_tokens, where_tokens }
+    }
+
+    pub fn is_generic(&self) -> bool {
+        !self.generics_tokens.is_empty() || !self.where_tokens.is_empty()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Primary registry  (key = crate + type name)
 // ---------------------------------------------------------------------------
 
-static REGISTRY: Lazy<Mutex<HashMap<RegKey, Vec<FieldDef>>>> =
+static REGISTRY: Lazy<Mutex<HashMap<RegKey, TypeEntry>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-/// Registers `fields` under `(crate_dir, type_name)` in the primary registry.
+/// Registers `entry` under `(crate_dir, type_name)` in the primary registry.
 ///
 /// Must **never panic** — a panic here would poison the global `Mutex` and
 /// cause every subsequent macro invocation to fail with `PoisonError`.
 /// Uses `unwrap_or_else(|e| e.into_inner())` to recover from a poisoned lock.
-pub fn register(crate_dir: Option<String>, type_name: String, fields: Vec<FieldDef>) {
+pub fn register(crate_dir: Option<String>, type_name: String, entry: TypeEntry) {
     REGISTRY
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert((crate_dir, type_name), fields);
+        .insert((crate_dir, type_name), entry);
 }
 
-/// Returns the registered fields for `(crate_dir, type_name)`, or `None`.
+/// Returns the registered `TypeEntry` for `(crate_dir, type_name)`, or `None`.
 ///
 /// Uses poison-safe lock recovery for the same reason as [`register`].
-pub fn lookup(crate_dir: Option<String>, type_name: &str) -> Option<Vec<FieldDef>> {
+pub fn lookup(crate_dir: Option<String>, type_name: &str) -> Option<TypeEntry> {
     REGISTRY
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -92,57 +133,35 @@ pub fn lookup(crate_dir: Option<String>, type_name: &str) -> Option<Vec<FieldDef
 // ---------------------------------------------------------------------------
 // Cross-crate import namespace  (key = None in primary registry)
 // ---------------------------------------------------------------------------
-//
-// Types registered by `__typeshaper_import!` (called via `typeshaper_import_TypeName!()`)
-// are stored here — completely separate from locally-defined types.
 
 /// Registers a cross-crate import under the `None` key.
 ///
-/// Using a dedicated call (rather than `register(None, ...)`) makes the
-/// intent explicit and avoids unit-test helpers accidentally writing to the
-/// import namespace with their `None` keys.
-///
 /// Called only by `expand_import` (via `__typeshaper_import!`).
+/// Cross-crate imports do not carry generic metadata (the companion macro
+/// format currently encodes only field names, types, and visibility).
 pub fn register_import(type_name: String, fields: Vec<FieldDef>) {
-    register(None, type_name, fields);
+    register(None, type_name, TypeEntry::plain(fields));
 }
 
 // ---------------------------------------------------------------------------
 // Export registry  (key = type name only)
 // ---------------------------------------------------------------------------
-//
-// Types annotated with `#[typeshaper(export)]` are written here IN ADDITION to
-// the primary registry.  This is the source-of-truth that `try_lookup` uses
-// as a final fallback when neither the precise key nor the import-namespace
-// key contains the requested type.
-//
-// **Why this is safe from collisions with same-named local types:**
-//   • `#[typeshaper]` (local, non-exported) does NOT write to this registry.
-//   • `#[typeshaper(export)]` explicitly marks a type as "available to other
-//     crates", so it is by definition the one a consumer wants.
-//
-// **rust-analyzer ordering guarantee:**
-//   rust-analyzer processes dependency crates before the current crate.
-//   When it processes the exporting crate, `#[typeshaper(export)]` fires and
-//   populates this registry.  By the time it expands `shape!()` in the
-//   consuming crate, the correct entry is already present — even if
-//   `typeshaper_import_TypeName!()` has not yet been expanded.
 
-static EXPORT_REGISTRY: Lazy<Mutex<HashMap<String, Vec<FieldDef>>>> =
+static EXPORT_REGISTRY: Lazy<Mutex<HashMap<String, TypeEntry>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-/// Write `fields` into the export registry under `type_name`.
+/// Write `entry` into the export registry under `type_name`.
 ///
 /// Called only by `register_typeshaper_export`; never called by `#[typeshaper]`.
-pub fn register_exported(type_name: String, fields: Vec<FieldDef>) {
+pub fn register_exported(type_name: String, entry: TypeEntry) {
     EXPORT_REGISTRY
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(type_name, fields);
+        .insert(type_name, entry);
 }
 
 /// Look up `type_name` in the export registry (last-resort cross-crate fallback).
-pub fn lookup_exported(type_name: &str) -> Option<Vec<FieldDef>> {
+pub fn lookup_exported(type_name: &str) -> Option<TypeEntry> {
     EXPORT_REGISTRY
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -158,7 +177,7 @@ pub fn lookup_exported(type_name: &str) -> Option<Vec<FieldDef>> {
 mod tests {
     use super::*;
 
-    // ── Fix 6: wrapped_optional 格式 ────────────────────────────────────────
+    // ── FieldDef constructors ────────────────────────────────────────────────
 
     #[test]
     fn wrapped_optional_no_extra_spaces_simple_type() {
@@ -192,7 +211,33 @@ mod tests {
         assert_eq!(f2.vis, "");
     }
 
-    // ── Fix 7: next_anon_id 全局单调递增 ────────────────────────────────────
+    // ── TypeEntry constructors ───────────────────────────────────────────────
+
+    #[test]
+    fn type_entry_plain_is_not_generic() {
+        let entry = TypeEntry::plain(vec![FieldDef::plain("x".into(), "pub".into(), "u32".into())]);
+        assert!(!entry.is_generic());
+        assert_eq!(entry.generics_tokens, "");
+        assert_eq!(entry.where_tokens, "");
+    }
+
+    #[test]
+    fn type_entry_with_generics_is_generic() {
+        let entry = TypeEntry::with_generics(
+            vec![],
+            "< T >".into(),
+            "".into(),
+        );
+        assert!(entry.is_generic());
+    }
+
+    #[test]
+    fn type_entry_where_only_is_generic() {
+        let entry = TypeEntry::with_generics(vec![], "".into(), "where T : Clone".into());
+        assert!(entry.is_generic());
+    }
+
+    // ── next_anon_id ─────────────────────────────────────────────────────────
 
     #[test]
     fn next_anon_id_is_monotonically_increasing() {
@@ -210,9 +255,7 @@ mod tests {
         assert_eq!(ids.len(), unique.len(), "all 16 ids must be unique");
     }
 
-    // ── Fix 1: register — 绝不 panic，冲突检测由调用方（expand.rs）负责 ────────
-
-    // `None` is used as the file key in unit-test contexts (no real span available).
+    // ── register / lookup ────────────────────────────────────────────────────
 
     #[test]
     fn register_is_idempotent_for_same_fields() {
@@ -220,38 +263,34 @@ mod tests {
             FieldDef::plain("id".into(), "pub".into(), "u64".into()),
             FieldDef::plain("name".into(), "pub".into(), "String".into()),
         ];
-        register(None, "__StateTest_Idempotent".into(), fields.clone());
-        register(None, "__StateTest_Idempotent".into(), fields.clone());
-        assert_eq!(lookup(None, "__StateTest_Idempotent").unwrap(), fields);
+        let entry = TypeEntry::plain(fields.clone());
+        register(None, "__StateTest_Idempotent".into(), entry.clone());
+        register(None, "__StateTest_Idempotent".into(), entry.clone());
+        assert_eq!(lookup(None, "__StateTest_Idempotent").unwrap().fields, fields);
     }
 
     #[test]
     fn register_overwrites_on_different_fields_without_panicking() {
-        let fields_a = vec![FieldDef::plain("id".into(), "pub".into(), "u64".into())];
-        let fields_b = vec![FieldDef::plain(
-            "name".into(),
-            "pub".into(),
-            "String".into(),
-        )];
-        register(None, "__StateTest_Overwrite".into(), fields_a);
-        register(None, "__StateTest_Overwrite".into(), fields_b.clone());
-        assert_eq!(lookup(None, "__StateTest_Overwrite").unwrap(), fields_b);
+        let fields_b = vec![FieldDef::plain("name".into(), "pub".into(), "String".into())];
+        register(None, "__StateTest_Overwrite".into(),
+            TypeEntry::plain(vec![FieldDef::plain("id".into(), "pub".into(), "u64".into())]));
+        register(None, "__StateTest_Overwrite".into(),
+            TypeEntry::plain(fields_b.clone()));
+        assert_eq!(lookup(None, "__StateTest_Overwrite").unwrap().fields, fields_b);
     }
 
     #[test]
     fn different_crates_same_name_do_not_collide() {
-        // Simulates two crates with different CARGO_MANIFEST_DIR values both
-        // having a type named `User` with distinct field sets.
         let dir_a = Some("/workspace/crate_a".to_string());
         let dir_b = Some("/workspace/crate_b".to_string());
         let fields_a = vec![FieldDef::plain("x".into(), "pub".into(), "u32".into())];
         let fields_b = vec![FieldDef::plain("y".into(), "pub".into(), "String".into())];
 
-        register(dir_a.clone(), "__StateTest_Scoped".into(), fields_a.clone());
-        register(dir_b.clone(), "__StateTest_Scoped".into(), fields_b.clone());
+        register(dir_a.clone(), "__StateTest_Scoped".into(), TypeEntry::plain(fields_a.clone()));
+        register(dir_b.clone(), "__StateTest_Scoped".into(), TypeEntry::plain(fields_b.clone()));
 
-        assert_eq!(lookup(dir_a, "__StateTest_Scoped").unwrap(), fields_a);
-        assert_eq!(lookup(dir_b, "__StateTest_Scoped").unwrap(), fields_b);
+        assert_eq!(lookup(dir_a, "__StateTest_Scoped").unwrap().fields, fields_a);
+        assert_eq!(lookup(dir_b, "__StateTest_Scoped").unwrap().fields, fields_b);
     }
 
     #[test]
@@ -262,36 +301,54 @@ mod tests {
     #[test]
     fn lookup_returns_registered_fields() {
         let fields = vec![FieldDef::plain("score".into(), "pub".into(), "u32".into())];
-        register(None, "__StateTest_Lookup".into(), fields.clone());
+        register(None, "__StateTest_Lookup".into(), TypeEntry::plain(fields.clone()));
         let got = lookup(None, "__StateTest_Lookup").expect("should be registered");
-        assert_eq!(got, fields);
+        assert_eq!(got.fields, fields);
     }
 
-    // ── cross-crate import namespace (None key) ─────────────────────────────
+    #[test]
+    fn register_preserves_generics_tokens() {
+        let entry = TypeEntry::with_generics(
+            vec![FieldDef::plain("val".into(), "pub".into(), "T".into())],
+            "< T >".into(),
+            "".into(),
+        );
+        register(None, "__StateTest_Generic".into(), entry.clone());
+        let got = lookup(None, "__StateTest_Generic").unwrap();
+        assert_eq!(got.generics_tokens, "< T >");
+        assert_eq!(got.where_tokens, "");
+    }
+
+    #[test]
+    fn register_preserves_where_tokens() {
+        let entry = TypeEntry::with_generics(
+            vec![FieldDef::plain("val".into(), "pub".into(), "T".into())],
+            "< T >".into(),
+            "where T : Clone".into(),
+        );
+        register(None, "__StateTest_Where".into(), entry);
+        let got = lookup(None, "__StateTest_Where").unwrap();
+        assert_eq!(got.where_tokens, "where T : Clone");
+    }
+
+    // ── cross-crate import namespace ─────────────────────────────────────────
 
     #[test]
     fn import_namespace_none_key_does_not_collide_with_local_key() {
         let local_dir = Some("/workspace/my_crate".to_string());
         let local_fields = vec![FieldDef::plain("age".into(), "pub".into(), "u8".into())];
-        register(
-            local_dir.clone(),
-            "__StateTest_Import_User".into(),
-            local_fields.clone(),
-        );
+        register(local_dir.clone(), "__StateTest_Import_User".into(),
+            TypeEntry::plain(local_fields.clone()));
 
-        let import_fields = vec![FieldDef::plain(
-            "role".into(),
-            "pub".into(),
-            "String".into(),
-        )];
+        let import_fields = vec![FieldDef::plain("role".into(), "pub".into(), "String".into())];
         register_import("__StateTest_Import_User".into(), import_fields.clone());
 
         assert_eq!(
-            lookup(local_dir, "__StateTest_Import_User").unwrap(),
+            lookup(local_dir, "__StateTest_Import_User").unwrap().fields,
             local_fields
         );
         assert_eq!(
-            lookup(None, "__StateTest_Import_User").unwrap(),
+            lookup(None, "__StateTest_Import_User").unwrap().fields,
             import_fields
         );
     }
@@ -300,53 +357,52 @@ mod tests {
 
     #[test]
     fn exported_type_is_found_by_lookup_exported() {
-        let fields = vec![FieldDef::plain(
-            "role".into(),
-            "pub".into(),
-            "String".into(),
-        )];
-        register_exported("__StateTest_ExportedUser".into(), fields.clone());
-        assert_eq!(lookup_exported("__StateTest_ExportedUser").unwrap(), fields);
+        let fields = vec![FieldDef::plain("role".into(), "pub".into(), "String".into())];
+        register_exported("__StateTest_ExportedUser".into(), TypeEntry::plain(fields.clone()));
+        assert_eq!(lookup_exported("__StateTest_ExportedUser").unwrap().fields, fields);
     }
 
     #[test]
     fn non_exported_type_is_not_in_export_registry() {
-        // register() (used by #[typeshaper]) does NOT write to EXPORT_REGISTRY.
         register(
             Some("/crate_a".into()),
             "__StateTest_LocalOnly".into(),
-            vec![FieldDef::plain("x".into(), "pub".into(), "u32".into())],
+            TypeEntry::plain(vec![FieldDef::plain("x".into(), "pub".into(), "u32".into())]),
         );
         assert!(lookup_exported("__StateTest_LocalOnly").is_none());
     }
 
     #[test]
     fn exported_type_does_not_collide_with_same_named_local_type() {
-        // Simulates: tests crate has #[typeshaper] User (local),
-        // core crate has #[typeshaper(export)] User (exported).
         let local_fields = vec![FieldDef::plain("age".into(), "pub".into(), "u8".into())];
-        let export_fields = vec![FieldDef::plain(
-            "role".into(),
-            "pub".into(),
-            "String".into(),
-        )];
+        let export_fields = vec![FieldDef::plain("role".into(), "pub".into(), "String".into())];
 
         register(
             Some("/tests_crate".into()),
             "__StateTest_DualUser".into(),
-            local_fields.clone(),
+            TypeEntry::plain(local_fields.clone()),
         );
-        register_exported("__StateTest_DualUser".into(), export_fields.clone());
+        register_exported("__StateTest_DualUser".into(), TypeEntry::plain(export_fields.clone()));
 
-        // Precise lookup finds the local type.
         assert_eq!(
-            lookup(Some("/tests_crate".into()), "__StateTest_DualUser").unwrap(),
+            lookup(Some("/tests_crate".into()), "__StateTest_DualUser").unwrap().fields,
             local_fields
         );
-        // Export lookup finds only the exported type.
         assert_eq!(
-            lookup_exported("__StateTest_DualUser").unwrap(),
+            lookup_exported("__StateTest_DualUser").unwrap().fields,
             export_fields
         );
+    }
+
+    #[test]
+    fn exported_type_preserves_generics() {
+        let entry = TypeEntry::with_generics(
+            vec![FieldDef::plain("val".into(), "pub".into(), "T".into())],
+            "< T : Clone >".into(),
+            "".into(),
+        );
+        register_exported("__StateTest_ExportedGeneric".into(), entry);
+        let got = lookup_exported("__StateTest_ExportedGeneric").unwrap();
+        assert_eq!(got.generics_tokens, "< T : Clone >");
     }
 }

@@ -1,0 +1,11 @@
+error: type `Wrapped` has generic parameters; declare them explicitly in `typex!`, e.g. `Target<T> = Wrapped<T>`
+  --> tests/ui/generic_without_params.rs:10:23
+   |
+10 | typex!(WrappedNoTag = Wrapped - [tag]);
+   |                       ^^^^^^^
+
+error[E0601]: `main` function not found in crate `$CRATE`
+  --> tests/ui/generic_without_params.rs:10:40
+   |
+10 | typex!(WrappedNoTag = Wrapped - [tag]);
+   |                                        ^ consider adding a `main` function to `$DIR/tests/ui/generic_without_params.rs`
