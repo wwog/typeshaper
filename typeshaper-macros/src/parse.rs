@@ -4,10 +4,13 @@ use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::{Attribute, Ident, Result, Token, bracketed, parenthesized};
 
-/// The full input to `typex!( [#[attr...]] Target[<Generics>][where ...] = Expr )`.
+/// The full input to `typex!( [#[attr...]] [vis] Target[<Generics>][where ...] = Expr )`.
 pub struct ShapeInput {
     /// Outer attributes placed before the target name, e.g. `#[derive(Serialize)]`.
     pub attrs: Vec<Attribute>,
+    /// Visibility of the generated struct.
+    /// Defaults to `Inherited` (private) when no visibility keyword is written.
+    pub vis: syn::Visibility,
     pub target: Ident,
     /// Explicit generic parameters for the generated target type.
     ///
@@ -43,6 +46,12 @@ pub enum ShapeExpr {
 impl Parse for ShapeInput {
     fn parse(input: ParseStream) -> Result<Self> {
         let attrs = Attribute::parse_outer(input)?;
+
+        // Parse optional visibility: `pub`, `pub(crate)`, `pub(super)`, etc.
+        // If no visibility keyword is present, `syn::Visibility::Inherited` is returned,
+        // which generates a private struct (Rust's default).
+        let vis: syn::Visibility = input.parse()?;
+
         let target: Ident = input.parse()?;
 
         // Parse optional generic params: `<T: Clone, 'a, U>`.
@@ -62,11 +71,12 @@ impl Parse for ShapeInput {
         match node {
             ShapeNode::Leaf(ident, ty_args) => Ok(Self {
                 attrs,
+                vis,
                 target,
                 target_generics,
                 expr: ShapeExpr::Rebuild { source: ShapeNode::Leaf(ident, ty_args) },
             }),
-            ShapeNode::Composed(expr) => Ok(Self { attrs, target, target_generics, expr: *expr }),
+            ShapeNode::Composed(expr) => Ok(Self { attrs, vis, target, target_generics, expr: *expr }),
         }
     }
 }
@@ -152,14 +162,11 @@ fn parse_ident_list(input: ParseStream) -> Result<Vec<Ident>> {
 // Input for `__typeshaper_import!`
 // ---------------------------------------------------------------------------
 //
-// Updated wire format (v2):
+// Wire format (v2, since typeshaper 0.1.4):
 //   TypeName, [<GenericParams>], [WhereClause], [vis] field1: Type1, ...
 //
 // The two bracket groups encode generics and where clause respectively.
 // Empty brackets `[]` denote absent generics / where clause.
-//
-// v1 (no generics): TypeName, [vis] field1: Type1, ...
-// v2 (with generics): TypeName, [<T: Clone>], [where T: Debug], field1: Type1, ...
 
 pub struct ImportInput {
     pub type_name: Ident,

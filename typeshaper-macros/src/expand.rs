@@ -20,9 +20,12 @@ fn crate_key() -> Option<String> {
 // ---------------------------------------------------------------------------
 
 /// Re-parse stored generics/where strings back into `syn::Generics`.
-fn parse_stored_generics(entry: &TypeEntry) -> syn::Generics {
+///
+/// Returns an error `TokenStream` if the stored tokens are malformed rather than
+/// silently returning empty generics, which would produce confusing downstream errors.
+fn parse_stored_generics(entry: &TypeEntry) -> Result<syn::Generics, TokenStream> {
     if !entry.is_generic() {
-        return syn::Generics::default();
+        return Ok(syn::Generics::default());
     }
     let src = format!(
         "struct __D{} {} {{}}",
@@ -30,7 +33,17 @@ fn parse_stored_generics(entry: &TypeEntry) -> syn::Generics {
     );
     syn::parse_str::<DeriveInput>(&src)
         .map(|di| di.generics)
-        .unwrap_or_default()
+        .map_err(|e| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!(
+                    "typeshaper: internal error re-parsing stored generics \
+                     `{}{}`; this is a bug — please report it: {}",
+                    entry.generics_tokens, entry.where_tokens, e
+                ),
+            )
+            .to_compile_error()
+        })
 }
 
 /// Determine the effective generics to use for a generated type.
@@ -43,13 +56,13 @@ fn effective_generics(
     explicit: &syn::Generics,
     source_entry: &TypeEntry,
     allow_inherit: bool,
-) -> syn::Generics {
+) -> Result<syn::Generics, TokenStream> {
     if !explicit.params.is_empty() || explicit.where_clause.is_some() {
-        explicit.clone()
+        Ok(explicit.clone())
     } else if allow_inherit && source_entry.is_generic() {
         parse_stored_generics(source_entry)
     } else {
-        syn::Generics::default()
+        Ok(syn::Generics::default())
     }
 }
 
@@ -131,12 +144,13 @@ fn source_type(
 
 pub fn expand_shape(input: ShapeInput) -> TokenStream {
     let attrs = input.attrs;
+    let vis = input.vis;
     let target = input.target;
     let target_generics = input.target_generics;
     let hint = target.to_string();
     let mut acc: Vec<TokenStream> = Vec::new();
 
-    let result = expand_expr(input.expr, &attrs, target, &target_generics, false, &hint, &mut acc);
+    let result = expand_expr(input.expr, &attrs, &vis, target, &target_generics, false, &hint, &mut acc);
 
     match result {
         Ok(main_ts) => {
@@ -257,6 +271,13 @@ fn try_register_typeshaper_export(input: DeriveInput) -> R {
         #[macro_export]
         macro_rules! #macro_ident {
             () => {
+                // Version assertion: catches mismatches when core and consumer crates
+                // use different typeshaper versions with incompatible wire formats.
+                const _: () = assert!(
+                    ::typeshaper::TYPESHAPER_WIRE_FORMAT_VERSION == 2u32,
+                    "typeshaper wire-format version mismatch: ensure all crates in the \
+                     workspace depend on the same typeshaper version"
+                );
                 ::typeshaper::__typeshaper_import!(
                     #type_ident,
                     [#generics_ts],
@@ -302,6 +323,7 @@ pub fn expand_import(input: ImportInput) -> TokenStream {
 fn expand_expr(
     expr: ShapeExpr,
     attrs: &[Attribute],
+    vis: &syn::Visibility,
     target: Ident,
     target_generics: &syn::Generics,
     allow_inherit: bool,
@@ -311,33 +333,33 @@ fn expand_expr(
     match expr {
         ShapeExpr::Rebuild { source } => {
             let (src_ident, src_ty_args) = expand_node(source, hint, acc)?;
-            rebuild(attrs, target, target_generics, allow_inherit, src_ident, src_ty_args)
+            rebuild(attrs, vis, target, target_generics, allow_inherit, src_ident, src_ty_args)
         }
         ShapeExpr::Omit { source, fields } => {
             let (src_ident, src_ty_args) = expand_node(source, hint, acc)?;
-            omit(attrs, target, target_generics, allow_inherit, src_ident, src_ty_args, fields)
+            omit(attrs, vis, target, target_generics, allow_inherit, src_ident, src_ty_args, fields)
         }
         ShapeExpr::Pick { source, fields } => {
             let (src_ident, src_ty_args) = expand_node(source, hint, acc)?;
-            pick(attrs, target, target_generics, allow_inherit, src_ident, src_ty_args, fields)
+            pick(attrs, vis, target, target_generics, allow_inherit, src_ident, src_ty_args, fields)
         }
         ShapeExpr::Merge { left, right } => {
             let (left_ident, left_ty_args) = expand_node(left, hint, acc)?;
             let (right_ident, right_ty_args) = expand_node(right, hint, acc)?;
-            merge(attrs, target, target_generics, allow_inherit, left_ident, left_ty_args, right_ident, right_ty_args)
+            merge(attrs, vis, target, target_generics, allow_inherit, left_ident, left_ty_args, right_ident, right_ty_args)
         }
         ShapeExpr::Partial { source } => {
             let (src_ident, src_ty_args) = expand_node(source, hint, acc)?;
-            partial(attrs, target, target_generics, allow_inherit, src_ident, src_ty_args)
+            partial(attrs, vis, target, target_generics, allow_inherit, src_ident, src_ty_args)
         }
         ShapeExpr::Required { source } => {
             let (src_ident, src_ty_args) = expand_node(source, hint, acc)?;
-            required(attrs, target, target_generics, allow_inherit, src_ident, src_ty_args)
+            required(attrs, vis, target, target_generics, allow_inherit, src_ident, src_ty_args)
         }
         ShapeExpr::Diff { left, right } => {
             let (left_ident, left_ty_args) = expand_node(left, hint, acc)?;
             let (right_ident, _) = expand_node(right, hint, acc)?;
-            diff(attrs, target, target_generics, allow_inherit, left_ident, left_ty_args, right_ident)
+            diff(attrs, vis, target, target_generics, allow_inherit, left_ident, left_ty_args, right_ident)
         }
     }
 }
@@ -345,8 +367,8 @@ fn expand_expr(
 /// Resolve a `ShapeNode` to `(concrete_ident, optional_explicit_ty_args)`.
 ///
 /// - Leaf returns its ident and explicit ty_args directly.
-/// - Composed generates an anonymous type (always with auto-inherited generics)
-///   and returns its ident with no explicit ty_args.
+/// - Composed generates an anonymous type marked `#[doc(hidden)]` with `pub(crate)`
+///   visibility (not user-visible, not exported) and returns its ident with no ty_args.
 fn expand_node(
     node: ShapeNode,
     hint: &str,
@@ -367,10 +389,14 @@ fn expand_node(
                 )
                 .to_compile_error()
             })?;
-            // Anonymous intermediates always allow generic auto-inherit (no user-specified ones).
+            // Anonymous intermediates are always pub(crate) + #[doc(hidden)] so they
+            // don't pollute the user's public API or rustdoc output.
+            let hidden: syn::Attribute = syn::parse_quote!(#[doc(hidden)]);
+            let anon_vis: syn::Visibility = syn::parse_quote!(pub(crate));
             let ts = expand_expr(
                 *expr,
-                &[],
+                &[hidden],
+                &anon_vis,
                 anon_ident.clone(),
                 &syn::Generics::default(),
                 true,
@@ -391,6 +417,7 @@ type R = Result<TokenStream, TokenStream>;
 
 fn rebuild(
     attrs: &[Attribute],
+    vis: &syn::Visibility,
     target: Ident,
     target_generics: &syn::Generics,
     allow_inherit: bool,
@@ -405,7 +432,7 @@ fn rebuild(
     }
     let (names, types, vises) = to_token_vecs(&src_entry.fields)?;
 
-    let eff_gen = effective_generics(target_generics, &src_entry, allow_inherit);
+    let eff_gen = effective_generics(target_generics, &src_entry, allow_inherit)?;
     let (impl_g, ty_g, where_c) = split(&eff_gen);
     let src_type = source_type(&source, source_ty_args.as_ref(), &ty_g);
 
@@ -418,7 +445,7 @@ fn rebuild(
 
     Ok(quote! {
         #(#attrs)*
-        pub struct #target #impl_g #where_c {
+        #vis struct #target #impl_g #where_c {
             #(#vises #names: #types,)*
         }
 
@@ -436,6 +463,7 @@ fn rebuild(
 
 fn omit(
     attrs: &[Attribute],
+    vis: &syn::Visibility,
     target: Ident,
     target_generics: &syn::Generics,
     allow_inherit: bool,
@@ -476,6 +504,7 @@ fn omit(
     }
     let omit_set = seen;
 
+    // Kept fields preserve source-type order (filter pass).
     let kept: Vec<FieldDef> = src_entry
         .fields
         .into_iter()
@@ -489,7 +518,7 @@ fn omit(
             src_entry.generics_tokens.clone(),
             src_entry.where_tokens.clone(),
         );
-        effective_generics(target_generics, &src_for_inherit, allow_inherit)
+        effective_generics(target_generics, &src_for_inherit, allow_inherit)?
     };
     let (impl_g, ty_g, where_c) = split(&eff_gen);
     let src_type = source_type(&source, source_ty_args.as_ref(), &ty_g);
@@ -503,7 +532,7 @@ fn omit(
 
     Ok(quote! {
         #(#attrs)*
-        pub struct #target #impl_g #where_c {
+        #vis struct #target #impl_g #where_c {
             #(#vises #names: #types,)*
         }
 
@@ -521,6 +550,7 @@ fn omit(
 
 fn pick(
     attrs: &[Attribute],
+    vis: &syn::Visibility,
     target: Ident,
     target_generics: &syn::Generics,
     allow_inherit: bool,
@@ -544,6 +574,7 @@ fn pick(
         .to_compile_error());
     }
 
+    // Kept fields follow the pick-list order (not source-type order).
     let mut seen = std::collections::HashSet::new();
     let mut kept: Vec<FieldDef> = Vec::new();
     for f in &pick_fields {
@@ -568,7 +599,7 @@ fn pick(
             src_entry.generics_tokens.clone(),
             src_entry.where_tokens.clone(),
         );
-        effective_generics(target_generics, &src_for_inherit, allow_inherit)
+        effective_generics(target_generics, &src_for_inherit, allow_inherit)?
     };
     let (impl_g, ty_g, where_c) = split(&eff_gen);
     let src_type = source_type(&source, source_ty_args.as_ref(), &ty_g);
@@ -582,7 +613,7 @@ fn pick(
 
     Ok(quote! {
         #(#attrs)*
-        pub struct #target #impl_g #where_c {
+        #vis struct #target #impl_g #where_c {
             #(#vises #names: #types,)*
         }
 
@@ -600,6 +631,7 @@ fn pick(
 
 fn merge(
     attrs: &[Attribute],
+    vis: &syn::Visibility,
     target: Ident,
     target_generics: &syn::Generics,
     allow_inherit: bool,
@@ -610,19 +642,13 @@ fn merge(
 ) -> R {
     let entry_a = try_lookup(&left)?;
     let entry_b = try_lookup(&right)?;
+
     if !allow_inherit {
-        // For merge, error if EITHER source is generic and target has no explicit params.
-        if (entry_a.is_generic() || entry_b.is_generic())
-            && target_generics.params.is_empty()
-            && target_generics.where_clause.is_none()
-        {
-            let offender = if entry_a.is_generic() { &left } else { &right };
-            let offender_entry = if entry_a.is_generic() { &entry_a } else { &entry_b };
-            if let Some(err) =
-                check_no_implicit_generics(offender, offender_entry, target_generics)
-            {
-                return Err(err);
-            }
+        if let Some(err) = check_no_implicit_generics(&left, &entry_a, target_generics) {
+            return Err(err);
+        }
+        if let Some(err) = check_no_implicit_generics(&right, &entry_b, target_generics) {
+            return Err(err);
         }
     }
 
@@ -650,7 +676,7 @@ fn merge(
     } else if allow_inherit {
         // Auto-merge both source generics (only for anonymous intermediates).
         // Uses syn-based deduplication to avoid <T, T> collisions (B-3).
-        merge_generics(&entry_a, &entry_b)
+        merge_generics(&entry_a, &entry_b)?
     } else {
         syn::Generics::default()
     };
@@ -661,7 +687,7 @@ fn merge(
     let left_ty = match left_ty_args.as_ref() {
         Some(a) => quote!(#left #a),
         None => {
-            let g = parse_stored_generics(&entry_a);
+            let g = parse_stored_generics(&entry_a)?;
             let (_, tg, _) = g.split_for_impl();
             quote!(#left #tg)
         }
@@ -669,7 +695,7 @@ fn merge(
     let right_ty = match right_ty_args.as_ref() {
         Some(a) => quote!(#right #a),
         None => {
-            let g = parse_stored_generics(&entry_b);
+            let g = parse_stored_generics(&entry_b)?;
             let (_, tg, _) = g.split_for_impl();
             quote!(#right #tg)
         }
@@ -686,7 +712,7 @@ fn merge(
 
     Ok(quote! {
         #(#attrs)*
-        pub struct #target #impl_g #where_c {
+        #vis struct #target #impl_g #where_c {
             #(#vises_a #names_a: #types_a,)*
             #(#vises_b #names_b: #types_b,)*
         }
@@ -699,6 +725,14 @@ fn merge(
                 }
             }
         }
+
+        impl #impl_g ::typeshaper::TypeshaperInto<#target #ty_g>
+            for (#left_ty, #right_ty) #where_c
+        {
+            fn typeshaper_into(self) -> #target #ty_g {
+                <#target #ty_g>::from(self)
+            }
+        }
     })
 }
 
@@ -708,6 +742,7 @@ fn merge(
 
 fn partial(
     attrs: &[Attribute],
+    vis: &syn::Visibility,
     target: Ident,
     target_generics: &syn::Generics,
     allow_inherit: bool,
@@ -753,7 +788,7 @@ fn partial(
             src_entry.generics_tokens.clone(),
             src_entry.where_tokens.clone(),
         );
-        effective_generics(target_generics, &src_for_inherit, allow_inherit)
+        effective_generics(target_generics, &src_for_inherit, allow_inherit)?
     };
     let (impl_g, ty_g, where_c) = split(&eff_gen);
     let src_type = source_type(&source, source_ty_args.as_ref(), &ty_g);
@@ -779,7 +814,7 @@ fn partial(
 
     Ok(quote! {
         #(#attrs)*
-        pub struct #target #impl_g #where_c {
+        #vis struct #target #impl_g #where_c {
             #(#vises #names: #opt_types,)*
         }
 
@@ -830,6 +865,7 @@ fn try_unwrap_option(ty_tokens: &str) -> Option<String> {
 
 fn required(
     attrs: &[Attribute],
+    vis: &syn::Visibility,
     target: Ident,
     target_generics: &syn::Generics,
     allow_inherit: bool,
@@ -843,26 +879,20 @@ fn required(
         }
     }
 
-    let inner_fields: Vec<FieldDef> = src_entry
-        .fields
-        .iter()
-        .map(|f| {
-            let inner_ty = f
-                .unwrapped_ty
-                .clone()
-                .or_else(|| try_unwrap_option(&f.ty_tokens));
-            match inner_ty {
-                Some(inner) => FieldDef::plain(f.name.clone(), f.vis.clone(), inner),
-                None => f.clone(),
-            }
-        })
-        .collect();
-
-    let needs_unwrap: Vec<bool> = src_entry
-        .fields
-        .iter()
-        .map(|f| f.unwrapped_ty.is_some() || try_unwrap_option(&f.ty_tokens).is_some())
-        .collect();
+    // Single pass: build inner_fields and needs_unwrap together to avoid calling
+    // try_unwrap_option twice per field.
+    let mut inner_fields: Vec<FieldDef> = Vec::with_capacity(src_entry.fields.len());
+    let mut needs_unwrap: Vec<bool> = Vec::with_capacity(src_entry.fields.len());
+    for f in &src_entry.fields {
+        let inner_ty = f.unwrapped_ty.clone().or_else(|| try_unwrap_option(&f.ty_tokens));
+        let needs = inner_ty.is_some();
+        needs_unwrap.push(needs);
+        inner_fields.push(if let Some(inner) = inner_ty {
+            FieldDef::plain(f.name.clone(), f.vis.clone(), inner)
+        } else {
+            f.clone()
+        });
+    }
 
     let (names, inner_types, vises) = to_token_vecs(&inner_fields)?;
     let eff_gen = {
@@ -871,7 +901,7 @@ fn required(
             src_entry.generics_tokens.clone(),
             src_entry.where_tokens.clone(),
         );
-        effective_generics(target_generics, &src_for_inherit, allow_inherit)
+        effective_generics(target_generics, &src_for_inherit, allow_inherit)?
     };
     let (impl_g, ty_g, where_c) = split(&eff_gen);
     let src_type = source_type(&source, source_ty_args.as_ref(), &ty_g);
@@ -904,7 +934,7 @@ fn required(
 
         Ok(quote! {
             #(#attrs)*
-            pub struct #target #impl_g #where_c {
+            #vis struct #target #impl_g #where_c {
                 #(#vises #names: #inner_types,)*
             }
 
@@ -917,9 +947,13 @@ fn required(
             }
         })
     } else {
+        // When the source has no Option-wrapped fields, `T!` is a no-op in terms of
+        // unwrapping; we generate `From<T>` rather than `TryFrom<T>` since there is
+        // nothing to fail on.  This is intentional: prefer the infallible conversion
+        // when it is guaranteed to succeed.
         Ok(quote! {
             #(#attrs)*
-            pub struct #target #impl_g #where_c {
+            #vis struct #target #impl_g #where_c {
                 #(#vises #names: #inner_types,)*
             }
 
@@ -938,6 +972,7 @@ fn required(
 
 fn diff(
     attrs: &[Attribute],
+    vis: &syn::Visibility,
     target: Ident,
     target_generics: &syn::Generics,
     allow_inherit: bool,
@@ -953,6 +988,7 @@ fn diff(
         }
     }
 
+    // Keep fields from A that are absent from B, compared by name AND normalised type string.
     let kept: Vec<FieldDef> = entry_a
         .fields
         .clone()
@@ -981,7 +1017,7 @@ fn diff(
             entry_a.generics_tokens.clone(),
             entry_a.where_tokens.clone(),
         );
-        effective_generics(target_generics, &src_for_inherit, allow_inherit)
+        effective_generics(target_generics, &src_for_inherit, allow_inherit)?
     };
     let (impl_g, ty_g, where_c) = split(&eff_gen);
     let left_type = source_type(&left, left_ty_args.as_ref(), &ty_g);
@@ -995,7 +1031,7 @@ fn diff(
 
     Ok(quote! {
         #(#attrs)*
-        pub struct #target #impl_g #where_c {
+        #vis struct #target #impl_g #where_c {
             #(#vises #names: #types,)*
         }
 
@@ -1115,9 +1151,9 @@ fn generic_param_ident(p: &syn::GenericParam) -> String {
 /// Where-clause predicates from both sides are combined without deduplication
 /// (identical predicates are harmless; de-duplicating them would require deeper
 /// semantic comparison).
-fn merge_generics(entry_a: &TypeEntry, entry_b: &TypeEntry) -> syn::Generics {
-    let g_a = parse_stored_generics(entry_a);
-    let g_b = parse_stored_generics(entry_b);
+fn merge_generics(entry_a: &TypeEntry, entry_b: &TypeEntry) -> Result<syn::Generics, TokenStream> {
+    let g_a = parse_stored_generics(entry_a)?;
+    let g_b = parse_stored_generics(entry_b)?;
 
     let existing: std::collections::HashSet<String> =
         g_a.params.iter().map(generic_param_ident).collect();
@@ -1131,7 +1167,7 @@ fn merge_generics(entry_a: &TypeEntry, entry_b: &TypeEntry) -> syn::Generics {
     if let Some(wc_b) = g_b.where_clause {
         merged.make_where_clause().predicates.extend(wc_b.predicates);
     }
-    merged
+    Ok(merged)
 }
 
 // ---------------------------------------------------------------------------
@@ -1178,10 +1214,37 @@ mod tests {
     }
 
     #[test]
+    fn parse_stored_generics_returns_error_on_invalid_tokens() {
+        let entry = TypeEntry::with_generics(
+            vec![],
+            "< invalid !! tokens >".into(),
+            "".into(),
+        );
+        assert!(
+            parse_stored_generics(&entry).is_err(),
+            "malformed generics_tokens must produce Err, not silent empty generics"
+        );
+    }
+
+    #[test]
+    fn parse_stored_generics_returns_ok_for_empty() {
+        let entry = TypeEntry::plain(vec![]);
+        let g = parse_stored_generics(&entry).expect("empty entry must succeed");
+        assert!(g.params.is_empty());
+    }
+
+    #[test]
+    fn parse_stored_generics_returns_ok_for_valid_generic() {
+        let entry = TypeEntry::with_generics(vec![], "< T >".into(), "".into());
+        let g = parse_stored_generics(&entry).expect("valid <T> must succeed");
+        assert_eq!(g.params.len(), 1);
+    }
+
+    #[test]
     fn merge_generics_both_empty() {
         let a = TypeEntry::plain(vec![]);
         let b = TypeEntry::plain(vec![]);
-        let merged = merge_generics(&a, &b);
+        let merged = merge_generics(&a, &b).unwrap();
         assert!(merged.params.is_empty(), "both empty → no params");
         assert!(merged.where_clause.is_none());
     }
@@ -1190,10 +1253,10 @@ mod tests {
     fn merge_generics_one_empty() {
         let a = TypeEntry::with_generics(vec![], "< T >".into(), "".into());
         let b = TypeEntry::plain(vec![]);
-        let merged_ab = merge_generics(&a, &b);
+        let merged_ab = merge_generics(&a, &b).unwrap();
         assert_eq!(merged_ab.params.len(), 1, "one generic + empty → 1 param");
 
-        let merged_ba = merge_generics(&b, &a);
+        let merged_ba = merge_generics(&b, &a).unwrap();
         assert_eq!(merged_ba.params.len(), 1, "empty + one generic → 1 param");
     }
 
@@ -1201,7 +1264,7 @@ mod tests {
     fn merge_generics_different_params() {
         let a = TypeEntry::with_generics(vec![], "< T >".into(), "".into());
         let b = TypeEntry::with_generics(vec![], "< U >".into(), "".into());
-        let merged = merge_generics(&a, &b);
+        let merged = merge_generics(&a, &b).unwrap();
         assert_eq!(merged.params.len(), 2, "T + U → 2 params");
         let names: Vec<String> = merged.params.iter().map(generic_param_ident).collect();
         assert!(names.contains(&"T".to_string()), "T must be present");
@@ -1212,7 +1275,7 @@ mod tests {
     fn merge_generics_deduplicates_same_param() {
         let a = TypeEntry::with_generics(vec![], "< T >".into(), "".into());
         let b = TypeEntry::with_generics(vec![], "< T >".into(), "".into());
-        let merged = merge_generics(&a, &b);
+        let merged = merge_generics(&a, &b).unwrap();
         assert_eq!(merged.params.len(), 1, "same param T in both → deduplicated to 1");
         assert_eq!(generic_param_ident(&merged.params[0]), "T");
     }
@@ -1221,7 +1284,7 @@ mod tests {
     fn merge_generics_combines_where_clauses() {
         let a = TypeEntry::with_generics(vec![], "< T >".into(), "where T : Clone".into());
         let b = TypeEntry::with_generics(vec![], "< U >".into(), "where U : Debug".into());
-        let merged = merge_generics(&a, &b);
+        let merged = merge_generics(&a, &b).unwrap();
         let wc = merged.where_clause.expect("should have where clause");
         assert_eq!(wc.predicates.len(), 2, "two predicates from both sides");
     }

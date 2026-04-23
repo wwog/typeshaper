@@ -544,3 +544,16 @@ fn rebuild_private_field_visibility_is_preserved() {
     };
     assert_eq!(copy.email, "t@t.com");
 }
+
+// ---------------------------------------------------------------------------
+// Merge supports .project() via TypeshaperInto<Target> for (A, B)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn merge_supports_project_via_tuple() {
+    let a = UserNoAge { id: 1, name: "x".into(), email: "x@y.com".into() };
+    let b = Badge { score: 7, label: "s".into() };
+    let combined: UserWithBadge = (a, b).project();
+    assert_eq!(combined.id, 1);
+    assert_eq!(combined.score, 7);
+}
