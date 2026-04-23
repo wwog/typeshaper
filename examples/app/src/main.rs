@@ -13,19 +13,19 @@ typeshaper_import_Address!();
 // ── 类型变换 ───────────────────────────────────────────────────────────────
 
 // Omit: 移除敏感字段，对外安全展示
-typex!(#[derive(Debug, Clone, PartialEq)] UserPublic = User - [role, active]);
+typex!(#[derive(Debug, Clone, PartialEq)] pub UserPublic = User - [role, active]);
 
 // Pick: 只保留摘要字段
-typex!(#[derive(Debug, Clone, PartialEq)] UserSummary = User & [id, name]);
+typex!(#[derive(Debug, Clone, PartialEq)] pub UserSummary = User & [id, name]);
 
 // Partial: 所有字段变 Option，用于增量更新场景
-typex!(#[derive(Debug, Clone, PartialEq)] UserPatch = User?);
+typex!(#[derive(Debug, Clone, PartialEq)] pub UserPatch = User?);
 
 // Merge: 将用户与收货地址合并为订单快照
-typex!(#[derive(Debug, Clone, PartialEq)] OrderSnapshot = User + Address);
+typex!(#[derive(Debug, Clone, PartialEq)] pub OrderSnapshot = User + Address);
 
 // Diff: 保留 User 中 Address 没有的字段（即用户专属字段）
-typex!(#[derive(Debug, Clone, PartialEq)] UserOnly = User % Address);
+typex!(#[derive(Debug, Clone, PartialEq)] pub UserOnly = User % Address);
 
 // ── 主函数 ────────────────────────────────────────────────────────────────
 
