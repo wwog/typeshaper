@@ -97,13 +97,13 @@ pub struct User {
 }
 
 // Remove two fields
-typex!(#[derive(Debug, Clone)] UserPublic  = User - [password_hash, created_at]);
+typex!(#[derive(Debug, Clone)] pub UserPublic  = User - [password_hash, created_at]);
 
 // Keep only two fields
-typex!(#[derive(Debug, Clone)] UserSummary = User & [id, name]);
+typex!(#[derive(Debug, Clone)] pub UserSummary = User & [id, name]);
 
 // Make all fields optional
-typex!(#[derive(Debug, Clone)] UserPatch   = User?);
+typex!(#[derive(Debug, Clone)] pub UserPatch   = User?);
 ```
 
 Conversions just work:
@@ -133,15 +133,17 @@ pub struct Address {
 }
 
 // Merge User and Address into a new type
-typex!(#[derive(Debug, Clone)] OrderSnapshot = User + Address);
+typex!(#[derive(Debug, Clone)] pub OrderSnapshot = User + Address);
 
 let snapshot = OrderSnapshot::from((user, address));
+// or via .project() on a tuple:
+let snapshot = (user, address).project::<OrderSnapshot>();
 ```
 
 Keep only the fields that are in `User` but not in `Address`:
 
 ```rust
-typex!(#[derive(Debug, Clone)] UserOnly = User % Address); // Diff
+typex!(#[derive(Debug, Clone)] pub UserOnly = User % Address); // Diff
 ```
 
 ---
@@ -150,13 +152,13 @@ typex!(#[derive(Debug, Clone)] UserOnly = User % Address); // Diff
 
 ```rust
 // Remove password_hash, then make remaining fields optional
-typex!(#[derive(Debug)] UserSafePatch = User - [password_hash]?);
+typex!(#[derive(Debug)] pub UserSafePatch = User - [password_hash]?);
 
 // Remove password_hash, then pick summary fields
-typex!(#[derive(Debug)] UserSafeDto = User - [password_hash] & [id, name, email]);
+typex!(#[derive(Debug)] pub UserSafeDto = User - [password_hash] & [id, name, email]);
 
 // Parentheses control associativity: Partial then Required (round-trip)
-typex!(#[derive(Debug)] UserRestored = (User - [password_hash])?!);
+typex!(#[derive(Debug)] pub UserRestored = (User - [password_hash])?!);
 ```
 
 ---
@@ -165,10 +167,10 @@ typex!(#[derive(Debug)] UserRestored = (User - [password_hash])?!);
 
 ```rust
 // Optional version for update endpoints
-typex!(#[derive(Debug, Clone)] UserPatch    = User?);
+typex!(#[derive(Debug, Clone)] pub UserPatch    = User?);
 
 // Restore to required after validation
-typex!(#[derive(Debug, Clone)] UserVerified = UserPatch!);
+typex!(#[derive(Debug, Clone)] pub UserVerified = UserPatch!);
 
 // ---
 
@@ -207,8 +209,8 @@ use core_crate::{User, typeshaper_import_User};
 typeshaper_import_User!();  // registers User's field metadata in this crate
 
 // works exactly like a locally annotated type
-typex!(#[derive(Debug, Clone)] UserPublic = User - [password_hash, created_at]);
-typex!(#[derive(Debug, Clone)] UserPatch  = User?);
+typex!(#[derive(Debug, Clone)] pub UserPublic = User - [password_hash, created_at]);
+typex!(#[derive(Debug, Clone)] pub UserPatch  = User?);
 ```
 
 ---
@@ -228,10 +230,10 @@ use core_crate::{User, typeshaper_import_User};
 typeshaper_import_User!();
 
 // Exact same fields as User — zero manual duplication
-typex!(#[napi] UserNapi = User);
+typex!(#[napi] pub UserNapi = User);
 
 // Drop sensitive fields first, then expose via napi
-typex!(#[napi] UserPublicNapi = User - [password_hash]);
+typex!(#[napi] pub UserPublicNapi = User - [password_hash]);
 ```
 
 The `User → UserNapi` conversion impl is generated automatically. The domain struct stays clean; the FFI crate owns the annotation.
@@ -256,9 +258,9 @@ pub struct Wrapper<T> {
 }
 
 // <T> is declared on both the target name and the source node
-typex!(#[derive(Debug, Clone)] WrapperNoLabel<T>  = Wrapper<T> - [label]);
-typex!(#[derive(Debug, Clone)] WrapperPartial<T>  = Wrapper<T>?);
-typex!(#[derive(Debug, Clone)] WrapperRequired<T> = WrapperPartial<T>!);
+typex!(#[derive(Debug, Clone)] pub WrapperNoLabel<T>  = Wrapper<T> - [label]);
+typex!(#[derive(Debug, Clone)] pub WrapperPartial<T>  = Wrapper<T>?);
+typex!(#[derive(Debug, Clone)] pub WrapperRequired<T> = WrapperPartial<T>!);
 
 let w = Wrapper { inner: 42u32, label: "hi".into(), count: 3 };
 let no_label: WrapperNoLabel<u32> = w.project();
@@ -276,7 +278,7 @@ pub struct Person<T> { pub name: T, pub age: u8 }
 pub struct Addr<U> { pub city: U, pub zip: String }
 
 // T comes from Person, U comes from Addr — both declared on the target
-typex!(#[derive(Debug)] PersonWithAddr<T, U> = Person<T> + Addr<U>);
+typex!(#[derive(Debug)] pub PersonWithAddr<T, U> = Person<T> + Addr<U>);
 
 let full = PersonWithAddr::from((person, addr));
 ```
@@ -284,9 +286,9 @@ let full = PersonWithAddr::from((person, addr));
 ### Inline trait bounds and where clauses
 
 ```rust
-typex!(PrintableValue<T: std::fmt::Display + Clone> = Printable<T> - [note]);
+typex!(pub PrintableValue<T: std::fmt::Display + Clone> = Printable<T> - [note]);
 
-typex!(ConstrainedData<T> where T: Clone + PartialEq = Constrained<T> - [meta]);
+typex!(pub ConstrainedData<T> where T: Clone + PartialEq = Constrained<T> - [meta]);
 ```
 
 ### Lifetime parameters
@@ -295,7 +297,7 @@ typex!(ConstrainedData<T> where T: Clone + PartialEq = Constrained<T> - [meta]);
 #[typeshaper]
 pub struct Borrowed<'a> { pub name: &'a str, pub value: u32 }
 
-typex!(BorrowedName<'a> = Borrowed<'a> & [name]);
+typex!(pub BorrowedName<'a> = Borrowed<'a> & [name]);
 ```
 
 ### Cross-crate generic types
@@ -312,8 +314,8 @@ pub struct GenericModel<T> { pub id: u64, pub payload: T, pub hidden: bool }
 // app-crate
 typeshaper_import_GenericModel!();
 
-typex!(#[derive(Debug)] ModelPublic<T> = GenericModel<T> - [hidden]);
-typex!(#[derive(Debug)] ModelDraft<T>  = GenericModel<T>?);
+typex!(#[derive(Debug)] pub ModelPublic<T> = GenericModel<T> - [hidden]);
+typex!(#[derive(Debug)] pub ModelDraft<T>  = GenericModel<T>?);
 ```
 
 > **Compile-error guard**: forgetting type parameters is caught at compile time:
@@ -365,7 +367,7 @@ pub struct User {
 | `T` | **Rebuild** | Copy all fields unchanged; apply new attributes | `TypeshaperInto<Target> for T` |
 | `T - [f1, f2]` | **Omit** | Remove listed fields | `TypeshaperInto<Target> for T` |
 | `T & [f1, f2]` | **Pick** | Keep only listed fields | `TypeshaperInto<Target> for T` |
-| `A + B` | **Merge** | Combine all fields of A and B (no duplicates) | `From<(A, B)> for Target` |
+| `A + B` | **Merge** | Combine all fields of A and B (no duplicates) | `From<(A, B)> for Target` + `TypeshaperInto<Target> for (A, B)` |
 | `T?` | **Partial** | Wrap every field in `Option<_>` | `From<T> for Target` |
 | `T!` | **Required** | Unwrap `Option<_>` from a Partial type | `TryFrom<T> for Target` (or `From<T>` when the source has no `Option` fields) |
 | `A % B` | **Diff** | Fields present in A but absent in B (matched on both field name **and** type) | `TypeshaperInto<Target> for A` |
@@ -391,10 +393,11 @@ typex!(Roundtrip = (User - [password_hash])?!);
 ### `typex!()` syntax
 
 ```
-typex!( [#[attr...]]  TargetName[<Params>] [where ...]  =  Expr );
+typex!( [#[attr...]]  [vis]  TargetName[<Params>] [where ...]  =  Expr );
 ```
 
 - **Attributes** (optional): placed before `TargetName`, forwarded verbatim to the generated struct; multiple attributes can be stacked. `typex!()` never adds any `#[derive]` on its own.
+- **Visibility** (optional): `pub`, `pub(crate)`, `pub(super)`, etc. **Defaults to private** when omitted — the generated struct is only accessible within the same module. Write explicit `pub` for types intended to be used outside the declaring module.
 - **TargetName**: the name of the generated struct; also registered in the compile-time table so it can be used as a source in subsequent `typex!()` calls.
 - **`<Params>`** (optional): explicit generic or lifetime parameters for the target type — required when any source in `Expr` is a generic type. Inline bounds (`T: Clone + Debug`) and separate `where` clauses are both accepted.
 - **Expr**: a type-algebra expression — see the table above. Each source node that refers to a generic type must carry matching type arguments: `Source<T>`, `Source<'a>`, etc.
@@ -403,7 +406,7 @@ typex!( [#[attr...]]  TargetName[<Params>] [where ...]  =  Expr );
 typex!(
     #[derive(Debug, Clone, PartialEq)]
     #[serde(rename_all = "camelCase")]
-    UserPublicDto = User & [id, name, email]
+    pub UserPublicDto = User & [id, name, email]
 );
 ```
 
@@ -417,10 +420,11 @@ typex!(
 let public: UserPublic = user.project();   // equivalent to user.typeshaper_into()
 ```
 
-`Merge` uses tuple `From`, `Partial` uses `From`, `Required` uses `TryFrom`:
+`Merge` uses tuple `From` or `.project()`, `Partial` uses `From`, `Required` uses `TryFrom`:
 
 ```rust
 let snapshot = OrderSnapshot::from((user, address));
+let snapshot = (user, address).project::<OrderSnapshot>(); // also works
 let draft    = UserPatch::from(user);
 let verified = UserVerified::try_from(draft)?;
 ```
