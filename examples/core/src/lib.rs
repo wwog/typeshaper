@@ -13,6 +13,13 @@ pub struct User {
     pub email: String,
     pub role: String,
     pub active: bool,
+    pub status: Status,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Status {
+    Active,
+    Inactive,
 }
 
 /// 收货地址——用于演示跨 crate 的 Merge / Diff 操作。

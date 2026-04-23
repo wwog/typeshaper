@@ -1,7 +1,7 @@
 use typeshaper::typex;
 use typeshaper_example_core::{
-    Address, Order, User,
-    typeshaper_import_Address, typeshaper_import_Order, typeshaper_import_User,
+    Address, Order, Status, User, typeshaper_import_Address, typeshaper_import_Order,
+    typeshaper_import_User,
 };
 
 // ── 跨 crate 注册 ──────────────────────────────────────────────────────────
@@ -53,6 +53,7 @@ fn main() {
         email: "alice@example.com".into(),
         role: "admin".into(),
         active: true,
+        status: Status::Active,
     };
     let addr = Address {
         street: "123 Main St".into(),
@@ -75,8 +76,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use typeshaper::TypeshaperExt;
     use std::convert::TryFrom;
+    use typeshaper::TypeshaperExt;
 
     fn sample_user() -> User {
         User {
@@ -85,6 +86,7 @@ mod tests {
             email: "bob@example.com".into(),
             role: "editor".into(),
             active: true,
+            status: Status::Active,
         }
     }
 
@@ -109,25 +111,25 @@ mod tests {
     #[test]
     fn omit_removes_role_and_active() {
         let public: UserPublic = sample_user().project();
-        assert_eq!(public.id,    42);
-        assert_eq!(public.name,  "Bob");
+        assert_eq!(public.id, 42);
+        assert_eq!(public.name, "Bob");
         assert_eq!(public.email, "bob@example.com");
     }
 
     #[test]
     fn pick_keeps_only_id_and_name() {
         let summary: UserSummary = sample_user().project();
-        assert_eq!(summary.id,   42);
+        assert_eq!(summary.id, 42);
         assert_eq!(summary.name, "Bob");
     }
 
     #[test]
     fn partial_wraps_all_fields_in_option() {
         let patch = UserPatch::from(sample_user());
-        assert_eq!(patch.id,     Some(42));
-        assert_eq!(patch.name,   Some("Bob".into()));
-        assert_eq!(patch.email,  Some("bob@example.com".into()));
-        assert_eq!(patch.role,   Some("editor".into()));
+        assert_eq!(patch.id, Some(42));
+        assert_eq!(patch.name, Some("Bob".into()));
+        assert_eq!(patch.email, Some("bob@example.com".into()));
+        assert_eq!(patch.role, Some("editor".into()));
         assert_eq!(patch.active, Some(true));
     }
 
@@ -137,26 +139,27 @@ mod tests {
         typex!(#[derive(Debug, Clone, PartialEq)] UserRestored = UserPatch!);
 
         let patch = UserPatch {
-            id:     Some(1),
-            name:   Some("Carol".into()),
-            email:  Some("c@example.com".into()),
-            role:   Some("viewer".into()),
+            id: Some(1),
+            name: Some("Carol".into()),
+            email: Some("c@example.com".into()),
+            role: Some("viewer".into()),
             active: Some(false),
+            status: Some(Status::Inactive),
         };
         let restored = UserRestored::try_from(patch).unwrap();
-        assert_eq!(restored.id,    1);
-        assert_eq!(restored.name,  "Carol");
+        assert_eq!(restored.id, 1);
+        assert_eq!(restored.name, "Carol");
         assert_eq!(restored.email, "c@example.com");
-        assert_eq!(restored.role,  "viewer");
+        assert_eq!(restored.role, "viewer");
         assert!(!restored.active);
     }
 
     #[test]
     fn merge_combines_user_and_address() {
         let snapshot = OrderSnapshot::from((sample_user(), sample_addr()));
-        assert_eq!(snapshot.id,      42);
-        assert_eq!(snapshot.name,    "Bob");
-        assert_eq!(snapshot.city,    "Shelbyville");
+        assert_eq!(snapshot.id, 42);
+        assert_eq!(snapshot.name, "Bob");
+        assert_eq!(snapshot.city, "Shelbyville");
         assert_eq!(snapshot.country, "US");
     }
 
@@ -166,10 +169,10 @@ mod tests {
         // Address fields: street, city, country
         // No overlap → UserOnly keeps all User fields
         let only: UserOnly = sample_user().project();
-        assert_eq!(only.id,     42);
-        assert_eq!(only.name,   "Bob");
-        assert_eq!(only.email,  "bob@example.com");
-        assert_eq!(only.role,   "editor");
+        assert_eq!(only.id, 42);
+        assert_eq!(only.name, "Bob");
+        assert_eq!(only.email, "bob@example.com");
+        assert_eq!(only.role, "editor");
         assert!(only.active);
     }
 
