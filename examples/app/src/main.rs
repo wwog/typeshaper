@@ -1,5 +1,8 @@
 use typeshaper::typex;
-use typeshaper_example_core::{Address, User, typeshaper_import_Address, typeshaper_import_User};
+use typeshaper_example_core::{
+    Address, Order, User,
+    typeshaper_import_Address, typeshaper_import_Order, typeshaper_import_User,
+};
 
 // ── 跨 crate 注册 ──────────────────────────────────────────────────────────
 //
@@ -9,6 +12,7 @@ use typeshaper_example_core::{Address, User, typeshaper_import_Address, typeshap
 
 typeshaper_import_User!();
 typeshaper_import_Address!();
+typeshaper_import_Order!();
 
 // ── 类型变换 ───────────────────────────────────────────────────────────────
 
@@ -26,6 +30,17 @@ typex!(#[derive(Debug, Clone, PartialEq)] pub OrderSnapshot = User + Address);
 
 // Diff: 保留 User 中 Address 没有的字段（即用户专属字段）
 typex!(#[derive(Debug, Clone, PartialEq)] pub UserOnly = User % Address);
+
+// ── 嵌套结构体字段 ────────────────────────────────────────────────────────────
+// Order.shipping 的类型是 Address（另一个结构体）。
+// typeshaper 将其视为普通不透明类型——Omit / Pick 操作只在 Order 的顶层字段上运作，
+// shipping 字段的值在转换时直接移动，Address 内部结构不受干扰。
+
+// Omit: 去掉 cancelled，shipping(Address 类型) 原样保留
+typex!(#[derive(Debug, Clone, PartialEq)] pub OrderView = Order - [cancelled]);
+
+// Pick: 只保留 id 和 shipping
+typex!(#[derive(Debug, Clone, PartialEq)] pub OrderShipping = Order & [id, shipping]);
 
 // ── 主函数 ────────────────────────────────────────────────────────────────
 
@@ -78,6 +93,16 @@ mod tests {
             street: "456 Oak Ave".into(),
             city: "Shelbyville".into(),
             country: "US".into(),
+        }
+    }
+
+    fn sample_order() -> Order {
+        Order {
+            id: 101,
+            user_id: 42,
+            amount_cents: 9900,
+            shipping: sample_addr(),
+            cancelled: false,
         }
     }
 
@@ -146,5 +171,34 @@ mod tests {
         assert_eq!(only.email,  "bob@example.com");
         assert_eq!(only.role,   "editor");
         assert!(only.active);
+    }
+
+    // ── 嵌套结构体字段 ────────────────────────────────────────────────────────
+    // 验证：当字段类型本身是结构体时，Omit / Pick 在顶层正常工作，
+    // 嵌套字段的值（Address）作为整体被移动，内部字段完整保留。
+
+    #[test]
+    fn omit_on_order_preserves_nested_address_field() {
+        // OrderView = Order - [cancelled]
+        // shipping(Address 类型) 应原样出现在生成的 OrderView 中
+        let view: OrderView = sample_order().project();
+        assert_eq!(view.id, 101);
+        assert_eq!(view.user_id, 42);
+        assert_eq!(view.amount_cents, 9900);
+        assert_eq!(view.shipping.city, "Shelbyville");
+        assert_eq!(view.shipping.street, "456 Oak Ave");
+        assert_eq!(view.shipping.country, "US");
+        // cancelled 字段已被 Omit，OrderView 中不存在，编译器静态保证
+    }
+
+    #[test]
+    fn pick_on_order_keeps_nested_address_field_intact() {
+        // OrderShipping = Order & [id, shipping]
+        // shipping 字段整体被 Pick，其内部 Address 数据完整保留
+        let ship: OrderShipping = sample_order().project();
+        assert_eq!(ship.id, 101);
+        assert_eq!(ship.shipping.street, "456 Oak Ave");
+        assert_eq!(ship.shipping.city, "Shelbyville");
+        assert_eq!(ship.shipping.country, "US");
     }
 }
