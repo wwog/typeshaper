@@ -95,13 +95,13 @@ pub struct User {
 }
 
 // 去掉两个字段
-typex!(#[derive(Debug, Clone)] UserPublic  = User - [password_hash, created_at]);
+typex!(#[derive(Debug, Clone)] pub UserPublic  = User - [password_hash, created_at]);
 
 // 只保留两个字段
-typex!(#[derive(Debug, Clone)] UserSummary = User & [id, name]);
+typex!(#[derive(Debug, Clone)] pub UserSummary = User & [id, name]);
 
 // 所有字段变可选
-typex!(#[derive(Debug, Clone)] UserPatch   = User?);
+typex!(#[derive(Debug, Clone)] pub UserPatch   = User?);
 ```
 
 转换直接用：
@@ -131,15 +131,17 @@ pub struct Address {
 }
 
 // 把 User 和 Address 合进一个新类型
-typex!(#[derive(Debug, Clone)] OrderSnapshot = User + Address);
+typex!(#[derive(Debug, Clone)] pub OrderSnapshot = User + Address);
 
 let snapshot = OrderSnapshot::from((user, address));
+// 也可以通过元组直接调用 .project()：
+let snapshot = (user, address).project::<OrderSnapshot>();
 ```
 
 只需要"User 有而 Address 没有"的字段：
 
 ```rust
-typex!(#[derive(Debug, Clone)] UserOnly = User % Address);  // Diff
+typex!(#[derive(Debug, Clone)] pub UserOnly = User % Address);  // Diff
 ```
 
 ---
@@ -148,13 +150,13 @@ typex!(#[derive(Debug, Clone)] UserOnly = User % Address);  // Diff
 
 ```rust
 // 先去掉 password_hash，再把剩余字段全部变可选
-typex!(#[derive(Debug)] UserSafePatch = User - [password_hash]?);
+typex!(#[derive(Debug)] pub UserSafePatch = User - [password_hash]?);
 
 // 去掉 password_hash 之后，只留摘要字段
-typex!(#[derive(Debug)] UserSafeDto = User - [password_hash] & [id, name, email]);
+typex!(#[derive(Debug)] pub UserSafeDto = User - [password_hash] & [id, name, email]);
 
 // 括号控制结合方向：先 Partial 再 Required（等价于恢复非可选）
-typex!(#[derive(Debug)] UserRestored = (User - [password_hash])?!);
+typex!(#[derive(Debug)] pub UserRestored = (User - [password_hash])?!);
 ```
 
 ---
@@ -163,10 +165,10 @@ typex!(#[derive(Debug)] UserRestored = (User - [password_hash])?!);
 
 ```rust
 // 可选版本用于更新接口
-typex!(#[derive(Debug, Clone)] UserPatch    = User?);
+typex!(#[derive(Debug, Clone)] pub UserPatch    = User?);
 
 // 验证通过后恢复为必填版本
-typex!(#[derive(Debug, Clone)] UserVerified = UserPatch!);
+typex!(#[derive(Debug, Clone)] pub UserVerified = UserPatch!);
 
 // ---
 
@@ -205,8 +207,8 @@ use core_crate::{User, typeshaper_import_User};
 typeshaper_import_User!();  // 把 User 的字段元数据注册到本 crate
 
 // 之后完全和本地 #[typeshaper] 类型一样用
-typex!(#[derive(Debug, Clone)] UserPublic = User - [password_hash, created_at]);
-typex!(#[derive(Debug, Clone)] UserPatch  = User?);
+typex!(#[derive(Debug, Clone)] pub UserPublic = User - [password_hash, created_at]);
+typex!(#[derive(Debug, Clone)] pub UserPatch  = User?);
 ```
 
 ---
@@ -226,10 +228,10 @@ use core_crate::{User, typeshaper_import_User};
 typeshaper_import_User!();
 
 // 字段与 User 完全相同，无需手动复制任何字段
-typex!(#[napi] UserNapi = User);
+typex!(#[napi] pub UserNapi = User);
 
 // 先去掉敏感字段，再经由 napi 导出
-typex!(#[napi] UserPublicNapi = User - [password_hash]);
+typex!(#[napi] pub UserPublicNapi = User - [password_hash]);
 ```
 
 `User → UserNapi` 的转换 impl 自动生成，领域结构体保持干净，FFI 层自行持有注解。
@@ -254,9 +256,9 @@ pub struct Wrapper<T> {
 }
 
 // <T> 同时出现在目标名称和源节点上
-typex!(#[derive(Debug, Clone)] WrapperNoLabel<T>  = Wrapper<T> - [label]);
-typex!(#[derive(Debug, Clone)] WrapperPartial<T>  = Wrapper<T>?);
-typex!(#[derive(Debug, Clone)] WrapperRequired<T> = WrapperPartial<T>!);
+typex!(#[derive(Debug, Clone)] pub WrapperNoLabel<T>  = Wrapper<T> - [label]);
+typex!(#[derive(Debug, Clone)] pub WrapperPartial<T>  = Wrapper<T>?);
+typex!(#[derive(Debug, Clone)] pub WrapperRequired<T> = WrapperPartial<T>!);
 
 let w = Wrapper { inner: 42u32, label: "hi".into(), count: 3 };
 let no_label: WrapperNoLabel<u32> = w.project();
@@ -274,7 +276,7 @@ pub struct Person<T> { pub name: T, pub age: u8 }
 pub struct Addr<U> { pub city: U, pub zip: String }
 
 // T 来自 Person，U 来自 Addr，目标同时声明两者
-typex!(#[derive(Debug)] PersonWithAddr<T, U> = Person<T> + Addr<U>);
+typex!(#[derive(Debug)] pub PersonWithAddr<T, U> = Person<T> + Addr<U>);
 
 let full = PersonWithAddr::from((person, addr));
 ```
@@ -282,9 +284,9 @@ let full = PersonWithAddr::from((person, addr));
 ### 内联 trait bound 与 where 子句
 
 ```rust
-typex!(PrintableValue<T: std::fmt::Display + Clone> = Printable<T> - [note]);
+typex!(pub PrintableValue<T: std::fmt::Display + Clone> = Printable<T> - [note]);
 
-typex!(ConstrainedData<T> where T: Clone + PartialEq = Constrained<T> - [meta]);
+typex!(pub ConstrainedData<T> where T: Clone + PartialEq = Constrained<T> - [meta]);
 ```
 
 ### 生命周期参数
@@ -293,7 +295,7 @@ typex!(ConstrainedData<T> where T: Clone + PartialEq = Constrained<T> - [meta]);
 #[typeshaper]
 pub struct Borrowed<'a> { pub name: &'a str, pub value: u32 }
 
-typex!(BorrowedName<'a> = Borrowed<'a> & [name]);
+typex!(pub BorrowedName<'a> = Borrowed<'a> & [name]);
 ```
 
 ### 跨 crate 泛型类型
@@ -310,8 +312,8 @@ pub struct GenericModel<T> { pub id: u64, pub payload: T, pub hidden: bool }
 // app-crate
 typeshaper_import_GenericModel!();
 
-typex!(#[derive(Debug)] ModelPublic<T> = GenericModel<T> - [hidden]);
-typex!(#[derive(Debug)] ModelDraft<T>  = GenericModel<T>?);
+typex!(#[derive(Debug)] pub ModelPublic<T> = GenericModel<T> - [hidden]);
+typex!(#[derive(Debug)] pub ModelDraft<T>  = GenericModel<T>?);
 ```
 
 > **编译期守卫**：忘记写类型参数会在编译时报错：
@@ -364,7 +366,7 @@ pub struct User {
 | `T` | **Rebuild** | 原样复制所有字段；附加新属性 | `TypeshaperInto<Target> for T` |
 | `T - [f1, f2]` | **Omit** | 移除列出的字段 | `TypeshaperInto<Target> for T` |
 | `T & [f1, f2]` | **Pick** | 只保留列出的字段 | `TypeshaperInto<Target> for T` |
-| `A + B` | **Merge** | 合并 A 和 B 的全部字段（不允许重名） | `From<(A, B)> for Target` |
+| `A + B` | **Merge** | 合并 A 和 B 的全部字段（不允许重名） | `From<(A, B)> for Target` + `TypeshaperInto<Target> for (A, B)` |
 | `T?` | **Partial** | 所有字段变为 `Option<_>` | `From<T> for Target` |
 | `T!` | **Required** | 还原 Partial 的 `Option<_>` | `TryFrom<T> for Target`（源无 `Option` 字段时为 `From<T>`） |
 | `A % B` | **Diff** | A 有而 B 没有的字段（按字段名**和**类型同时匹配） | `TypeshaperInto<Target> for A` |
@@ -390,10 +392,11 @@ typex!(Roundtrip = (User - [password_hash])?!);
 ### `typex!()` 语法
 
 ```
-typex!( [#[attr...]]  TargetName[<Params>] [where ...]  =  Expr );
+typex!( [#[attr...]]  [vis]  TargetName[<Params>] [where ...]  =  Expr );
 ```
 
 - **属性**（可选）：写在 `TargetName` 前，原样附加到生成的结构体，支持叠放多个。`typex!()` 不会自动添加任何 `#[derive]`，全部由调用方声明。
+- **可见性**（可选）：`pub`、`pub(crate)`、`pub(super)` 等。**省略时默认为私有**——生成的结构体仅在同一模块内可访问。需要在模块外使用的类型，必须显式写 `pub`。
 - **TargetName**：生成的结构体名称，同时注册到编译期注册表，可继续作为后续 `typex!()` 的输入。
 - **`<Params>`**（可选）：目标类型的显式泛型或生命周期参数——当 `Expr` 中任意源类型是泛型时必须填写。支持内联 bound（`T: Clone + Debug`）和单独 `where` 子句两种写法。
 - **Expr**：类型代数表达式，见上表。涉及泛型源类型的节点必须携带匹配的类型参数：`Source<T>`、`Source<'a>` 等。
@@ -402,7 +405,7 @@ typex!( [#[attr...]]  TargetName[<Params>] [where ...]  =  Expr );
 typex!(
     #[derive(Debug, Clone, PartialEq)]
     #[serde(rename_all = "camelCase")]
-    UserPublicDto = User & [id, name, email]
+    pub UserPublicDto = User & [id, name, email]
 );
 ```
 
@@ -416,10 +419,11 @@ typex!(
 let public: UserPublic = user.project();   // 等价于 user.typeshaper_into()
 ```
 
-`Merge` 使用元组 `From`，`Partial` 使用 `From`，`Required` 使用 `TryFrom`：
+`Merge` 使用元组 `From` 或 `.project()`，`Partial` 使用 `From`，`Required` 使用 `TryFrom`：
 
 ```rust
 let snapshot = OrderSnapshot::from((user, address));
+let snapshot = (user, address).project::<OrderSnapshot>(); // 同样可用
 let draft    = UserPatch::from(user);
 let verified = UserVerified::try_from(draft)?;
 ```
